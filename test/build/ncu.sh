@@ -5,7 +5,8 @@
 
 # 可配置项
 NCU_PATH="/usr/local/cuda/bin/ncu"
-PROG_PATH="/data1/lys/workspaces/code/cudaCode_v0/test/build/kernelTest"
+# PROG_PATH="/data1/lys/workspaces/code/cudaCode_v0/test/build/kernelTest"
+PROG_PATH="/data1/lys/workspaces/code/cudaCode_v0/bench/benchMain"
 REPORT_DIR="/data1/lys/workspaces/code/cudaCode_v0/test/nsys"
 REPORT_NAME="kernelTest_$(date +%Y%m%d_%H%M%S).ncu-rep"
 

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <assert.h>
 #include <cublas_v2.h>
 #include <cuda.h>
@@ -6,8 +7,17 @@
 #include <cusparse_v2.h>
 #include <stdio.h>
 
-#include "utils.h"
+#include "../test/utils.h"
 #include "../src/SpMM_API.cu"
+#include "backends/cuSparseLt_backend.cuh"
+
+struct BenchCase{
+    int M, K, N, SPLIT_K; 
+};
+
+struct BenchResult{
+
+};
 
 
 int main(int argc, char** argv){
@@ -51,7 +61,6 @@ int main(int argc, char** argv){
     }
 
     // GPU 分配空间
-    // TODO：这个 reinterpret_cast 是什么？
     cudaMalloc(reinterpret_cast<void**>(&A_device), sizeof(half) * M_GLOBAL * K_GLOBAL);
     cudaMalloc(reinterpret_cast<void**>(&B_device), sizeof(half) * N_GLOBAL * K_GLOBAL);
     cudaMalloc(reinterpret_cast<void**>(&B_rowMajor_device), sizeof(half) * N_GLOBAL * K_GLOBAL);
@@ -66,7 +75,6 @@ int main(int argc, char** argv){
     init_host_matrices_pruned(A_host, M_GLOBAL, K_GLOBAL);
     init_host_matrices(B_rowMajor_host, K_GLOBAL, N_GLOBAL);
 
-    // TODO 这个有何用？？？
     // 转置获取列主序的矩阵 B
     for (int i = 0; i < K_GLOBAL; i++)
         for (int j = 0; j < N_GLOBAL; j++)
@@ -80,12 +88,41 @@ int main(int argc, char** argv){
     cudaMemcpy(B_rowMajor_device, B_rowMajor_host, sizeof(half) * N_GLOBAL * K_GLOBAL, cudaMemcpyHostToDevice);
     checkLastCudaError(__LINE__);
 
+    // 执行 cuSPARSELt kernel 计算
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    printf("开始执行 cuSPARSELt 计算...\n");
+    // 初始化 cuSPARSELt 的存储空间
+    half* cusparseLtResult_device = NULL;  // row major
+    cudaMalloc(reinterpret_cast<void**>(&cusparseLtResult_device), sizeof(half) * M_GLOBAL * N_GLOBAL);
+    if (cusparseLtResult_device == NULL) {
+        printf("Error in spmm_test.cu: line %d cudaMalloc falied\n", __LINE__);
+        exit(-1);
+    }
+    cudaMemset(cusparseLtResult_device, 0, sizeof(half) * M_GLOBAL * N_GLOBAL);
 
+    // kernel 测试
+    float milliseconds_cusparseLt = RunCuSparseLtExample(M_GLOBAL, N_GLOBAL, K_GLOBAL, A_device, B_rowMajor_device, cusparseLtResult_device, cusparseLtResult_device);
+
+    // 将 cuSPARSELt 的结果 copy 回 CPU
+    half* cusparseLtResult_host = NULL;  // row major
+    cusparseLtResult_host = (half*)malloc(sizeof(half) * M_GLOBAL * N_GLOBAL);
+    if (cusparseLtResult_host == NULL) {
+        printf("Error in spmm_test.cu: line %d CPU Malloc falied\n", __LINE__);
+        exit(-1);
+    }
+    cudaMemcpy(cusparseLtResult_host, cusparseLtResult_device, sizeof(half) * M_GLOBAL * N_GLOBAL, cudaMemcpyDeviceToHost);  // Row Major
+    cudaFree(cusparseLtResult_device);  // 释放 GPU 上占用的空间
+
+    // 统计 cuSPARSELt 的平均执行时间
+    milliseconds_cusparseLt = milliseconds_cusparseLt / BENCHMARK_ITERATION;  // 平均执行时间
+    float tflops_cusparseLt = static_cast<double>((static_cast<double>(M_GLOBAL) * N_GLOBAL * K_GLOBAL * 2) / (milliseconds_cusparseLt / 1000.0)) / 1e12;  // TFLOPS
+
+    
 
 
     // 执行 cublas kernel 计算
     ////////////////////////////////////////////////////////////////////////////////////////////////
-    printf("开始执行 cuBLAS 计算...\n");
+    printf("开始执行 cublas 计算...\n");
     // 初始化 cublas 的存储空间
     half* cublasResult_device = NULL;  // col major
     cudaMalloc(reinterpret_cast<void**>(&cublasResult_device), sizeof(half) * M_GLOBAL * N_GLOBAL);
@@ -218,6 +255,7 @@ int main(int argc, char** argv){
     cudaFree(result_device);
     cudaFree(metadata_device);
     cudaFree(compressedMatrixA_device);
+    cudaFree(packMatrixB_device);
     ////////////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -226,15 +264,35 @@ int main(int argc, char** argv){
     // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 //
     // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 //
 
+    int preview_count = 256;
+    printf("cublasResult_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
+    for (int i = 128; i < preview_count; ++i) {
+        printf("%.4f ", __half2float(cublasResult_host[i]));
+    }
+    printf("\n");
+
+    printf("result_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
+    for (int i = 128; i < preview_count; ++i) {
+        printf("%.4f ", __half2float(result_host[i]));
+    }
+    printf("\n");
+
+    printf("cusparseLtResult_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
+    for (int i = 128; i < preview_count; ++i) {
+        printf("%.4f ", __half2float(cusparseLtResult_host[i]));
+    }
+    printf("\n");
+
     int totalErrorNums = 0;
     totalErrorNums = ComputeTotalError(cublasResult_host, result_host, M_GLOBAL, N_GLOBAL, true);  // 统计我设计的kernel的准确率
 
-    // int totalErrorNums_cusparseLt = 0;
-    // totalErrorNums_cusparseLt = ComputeTotalError(cublasResult_host, cusparseLtResult_host, M_GLOBAL, N_GLOBAL, false);  // 统计 cusparseLt 的准确率
+    int totalErrorNums_cusparseLt = 0;
+    totalErrorNums_cusparseLt = ComputeTotalError(cublasResult_host, cusparseLtResult_host, M_GLOBAL, N_GLOBAL, false);  // 统计 cusparseLt 的准确率
 
     free(result_host);  // 释放空间
+    free(cusparseLtResult_host);  // 释放空间
     PrintPerformance("cublas", milliseconds_cublas, tflops_cublas, 0);
-    // PrintPerformance("cusparseLt", milliseconds_cusparseLt, tflops_cusparseLt, totalErrorNums_cusparseLt);
+    PrintPerformance("cusparseLt", milliseconds_cusparseLt, tflops_cusparseLt, totalErrorNums_cusparseLt);
     PrintPerformance("n2m4", milliseconds_SpMM, tflops_SpMM, totalErrorNums);
 
 
