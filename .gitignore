@@ -1,0 +1,28 @@
+# Build outputs
+*.o
+*.so
+*.a
+*.out
+*.d
+*.elf
+
+# Executables
+kernelTest
+
+# Profiling reports
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.sqlite
+
+# Logs and crash dumps
+*.log
+core
+core.*
+
+# CUDA / temporary profiling folders
+test/nsys/
+
+# Generated test outputs
+test/debugData/ans/*.txt
+
