@@ -170,11 +170,10 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
             break;  
         case 512:
             // Keep a 128x128x64 tile and a 256-thread block for large-N cases.
-            // <32,4,2,8,2,2> -> TILE_M=128, TILE_N=128, TILE_K=64, BLOCK_THREADS=256
-            // Keep the 128x128x64 tile geometry, but switch the N=512 path to
-            // m16n8k32 sparse MMA so each warp does fewer fragment loads and
-            // metadata hand-offs for the same K coverage.
-            SpMM_N2M4_Kernel_API<N2M4ConfigN128WideK32, 2>(
+            // <16,2,4,4,4,4> -> TILE_M=128, TILE_N=128, TILE_K=64, BLOCK_THREADS=256
+            // Rebalance the same tile across warps so each warp carries fewer
+            // B fragments from shared memory, targeting the current MIO stall.
+            SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 1024:
