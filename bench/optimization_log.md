@@ -23,7 +23,7 @@
 
 ## 2026-03-10 19:05 CST
 
-- Commit: pending
+- Commit: `fb62106`
 - Change: add a direct register-to-global output store path for the active `N=512` config `N2M4TilingConfig<16, 2, 4, 4, 4, 4>` in `src/SpMM_Kernel.cuh`, backed by a new `StoreToGlobalMemoryFromRegister_half` helper in `src/LoadAndStore.cuh`.
 - Rationale: the current `stages=3` kernel is still paying a final `register -> shared -> global` round-trip plus a block-wide `__syncthreads()` even though each warp owns a disjoint output subtile. The latest NCU still shows `barrier=1.652997`, `mio=1.374762`, and `smsp__sass_inst_executed_op_shared_st.sum=32768`, so the next single-variable step is to remove that shared-memory writeback path only for the active `N=512` tile.
 - Status: pending cloud validation.
