@@ -368,7 +368,7 @@ struct OutputStorePolicy<N2M4TilingConfig<16, 2, 4, 4, 4, 4>> {
         int N_Global,
         float c[][REG_PER_C_TENSOR_16_8])
     {
-        StoreToGlobalMemoryFromRegister_half<N2M4TilingConfig<16, 2, 4, 4, 4, 4>>(
+        StoreToGlobalMemoryFromRegister_half_Coalesced_N128Balanced(
             blockGlobalPTR, N_Global, c);
     }
 };

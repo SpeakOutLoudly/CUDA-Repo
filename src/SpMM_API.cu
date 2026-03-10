@@ -189,12 +189,11 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 512:
-            // Shift the N=512 path to a 128x64x64 tile and 128-thread block.
-            // <16,2,2,4,4,4> -> TILE_M=128, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
-            // This cuts dynamic shared memory to 34816B so sm86/A40 can keep two
-            // resident blocks per SM, trading extra A/metadata traffic for better
-            // residency while leaving B/global-store traffic unchanged.
-            Error = SpMM_N2M4_Kernel_API<N2M4ConfigN128Compact, 2>(
+            // Restore the best-known 128x128x64 / 256-thread launch for N=512.
+            // <16,2,4,4,4,4> -> TILE_M=128, TILE_N=128, TILE_K=64, BLOCK_THREADS=256
+            // This path now uses a coalesced direct-output store, so the launch
+            // policy stays fixed while we retest only the output path.
+            Error = SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 1024:

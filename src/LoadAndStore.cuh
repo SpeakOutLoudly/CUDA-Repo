@@ -467,6 +467,67 @@ StoreToGlobalMemoryFromRegister_half(   half* __restrict__ BlockGlobalPTR,
     }
 }
 
+__device__ __forceinline__ uint32_t PackHalf2ToUint(float x, float y)
+{
+    union {
+        half2 h2;
+        uint32_t u32;
+    } packed;
+    packed.h2 = __halves2half2(__float2half_rn(x), __float2half_rn(y));
+    return packed.u32;
+}
+
+__device__ __forceinline__ void
+StoreToGlobalMemoryFromRegister_half_Coalesced_N128Balanced(
+    half* __restrict__ BlockGlobalPTR,
+    int N_Global,
+    float c[][REG_PER_C_TENSOR_16_8])
+{
+    const unsigned int warpId = threadIdx.x / WARP_SIZE;
+    const int warpIdxM = warpId / N2M4ConfigN128Balanced::BLOCK_COL_WARPS;
+    const int warpIdxN = warpId % N2M4ConfigN128Balanced::BLOCK_COL_WARPS;
+    const int warpRowStart =
+        warpIdxM * (N2M4ConfigN128Balanced::MMA_M_SP * N2M4ConfigN128Balanced::WARP_ROW_TENSORS);
+    const int warpColStart =
+        warpIdxN * (N2M4ConfigN128Balanced::MMA_N_SP * N2M4ConfigN128Balanced::WARP_COL_TENSORS);
+
+    const int lane = threadIdx.x % WARP_SIZE;
+    const int rowInTensor = lane / 2;
+    const int colChunk = lane % 2;
+    const int srcRow = rowInTensor & 7;
+    const int srcLaneBase = srcRow * 4;
+    const int regOffset = (rowInTensor < 8) ? 0 : 2;
+    const unsigned int mask = 0xffffffffu;
+
+    #pragma unroll
+    for (int i = 0; i < N2M4ConfigN128Balanced::WARP_ROW_TENSORS; i++) {
+        #pragma unroll
+        for (int j = 0; j < N2M4ConfigN128Balanced::WARP_COL_TENSORS / 2; j++) {
+            const int regSetId = i * N2M4ConfigN128Balanced::WARP_COL_TENSORS + j * 2 + colChunk;
+
+            uint4 packed;
+            packed.x = PackHalf2ToUint(
+                __shfl_sync(mask, c[regSetId][regOffset + 0], srcLaneBase + 0),
+                __shfl_sync(mask, c[regSetId][regOffset + 1], srcLaneBase + 0));
+            packed.y = PackHalf2ToUint(
+                __shfl_sync(mask, c[regSetId][regOffset + 0], srcLaneBase + 1),
+                __shfl_sync(mask, c[regSetId][regOffset + 1], srcLaneBase + 1));
+            packed.z = PackHalf2ToUint(
+                __shfl_sync(mask, c[regSetId][regOffset + 0], srcLaneBase + 2),
+                __shfl_sync(mask, c[regSetId][regOffset + 1], srcLaneBase + 2));
+            packed.w = PackHalf2ToUint(
+                __shfl_sync(mask, c[regSetId][regOffset + 0], srcLaneBase + 3),
+                __shfl_sync(mask, c[regSetId][regOffset + 1], srcLaneBase + 3));
+
+            half* dst = BlockGlobalPTR
+                + (warpRowStart + i * N2M4ConfigN128Balanced::MMA_M_SP + rowInTensor) * N_Global
+                + warpColStart + j * 16 + colChunk * 8;
+
+            *reinterpret_cast<uint4*>(dst) = packed;
+        }
+    }
+}
+
 // template<typename N2M4TilingConfig>
 // __device__ __forceinline__ void
 // StoreToGlobalMemoryFromShared_V0(  half (*smem_CFrag)[N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C],  // 注意这里是行主序
