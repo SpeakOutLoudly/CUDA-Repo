@@ -513,8 +513,7 @@ __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  //
     // 这个数组的每个元素本身又是一个大小为 TILE_N + PADDING_SHARED_MEM_FOR_C 的 half 数组
     // 注意这里进行存储的时候保存成行主序
 
-    // Each warp writes and drains its own output subtile, so warp-level sync in the
-    // store path is sufficient here.
+    __syncthreads();
     half(*smem_CFrag)[N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C] = reinterpret_cast<half(*)[N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C]>(sharedMem);
     StoreToSharedMemoryFromRegister_half<N2M4TilingConfig>(smem_CFrag, c);  // 将各个 Wrap 的结果写入共享内存中
 
