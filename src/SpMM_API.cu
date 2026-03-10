@@ -7,28 +7,28 @@
 #include "SpMM_Kernel.cuh"
 
 template<typename N2M4TilingConfig, int stages>
-static void SpMM_N2M4_Kernel_API(cudaStream_t stream,
-                                 const half* Compressed_A,
-                                 const half* B,
-                                 const uint16_t* metadata,
-                                 half* C,
-                                 int M_Global,
-                                 int N_Global,
-                                 int K_Global,
-                                 int Split_K);
+static cudaError_t SpMM_N2M4_Kernel_API(cudaStream_t stream,
+                                        const half* Compressed_A,
+                                        const half* B,
+                                        const uint16_t* metadata,
+                                        half* C,
+                                        int M_Global,
+                                        int N_Global,
+                                        int K_Global,
+                                        int Split_K);
 
 
 // cuda 的启动函数
 template<typename N2M4TilingConfig, int stages>
-static void SpMM_N2M4_Kernel_API(   cudaStream_t stream,
-                                    const half*  Compressed_A,
-                                    const half*  B,
-                                    const uint16_t*  metadata,
-                                    half*        C,
-                                    const int    M_Global,
-                                    const int    N_Global,
-                                    const int    K_Global,
-                                    const int    Split_K)
+static cudaError_t SpMM_N2M4_Kernel_API(   cudaStream_t stream,
+                                           const half*  Compressed_A,
+                                           const half*  B,
+                                           const uint16_t*  metadata,
+                                           half*        C,
+                                           const int    M_Global,
+                                           const int    N_Global,
+                                           const int    K_Global,
+                                           const int    Split_K)
 {
     // 进行 shared memory 的申请，其中包括两部分：1.计算数据的存储空间 2.计算结果的存储空间 考虑分时复用只需要取大就行
     int computeSize = (N2M4TilingConfig::TILE_N * N2M4TilingConfig::TILE_K) * sizeof(half) * stages       // 稠密激活矩阵，使用双缓冲区的设计
@@ -39,9 +39,27 @@ static void SpMM_N2M4_Kernel_API(   cudaStream_t stream,
     int resultSize = (N2M4TilingConfig::TILE_M * (N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C)) * sizeof(half);  // 计算结果的存储空间，注意这里是 half 类型
     int SHMEM_SZ = max(computeSize, resultSize);
 
+    int device = 0;
+    cudaError_t Error = cudaGetDevice(&device);
+    if (Error != cudaSuccess)
+        return Error;
+
+    int maxOptinSharedMem = 0;
+    Error = cudaDeviceGetAttribute(&maxOptinSharedMem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    if (Error != cudaSuccess)
+        return Error;
+
+    if (SHMEM_SZ > maxOptinSharedMem) {
+        printf("[SpMM] requested dynamic shared memory %d exceeds opt-in limit %d (stages=%d, N=%d).\n",
+               SHMEM_SZ, maxOptinSharedMem, stages, N_Global);
+        return cudaErrorInvalidConfiguration;
+    }
+
     // 进行 cuda 设置，表示 SpMM_Kernel_bitmap_v3 内核需要使用 SHMEM_SZ 大小的共享内存
     // cudaFuncAttributeMaxDynamicSharedMemorySize 表示进行设置的属性：函数属性-最大动态共享内存大小
-    cudaFuncSetAttribute(SpMM_N2M4_Kernel<N2M4TilingConfig, stages>, cudaFuncAttributeMaxDynamicSharedMemorySize, SHMEM_SZ);
+    Error = cudaFuncSetAttribute(SpMM_N2M4_Kernel<N2M4TilingConfig, stages>, cudaFuncAttributeMaxDynamicSharedMemorySize, SHMEM_SZ);
+    if (Error != cudaSuccess)
+        return Error;
     
     // 分块确定grid维度
     int dimN = max(N_Global / N2M4TilingConfig::TILE_N, 1);  // max(N_Global/N2M4TilingConfig::TILE_N,1) used when N=8, TILE_N=16
@@ -54,6 +72,7 @@ static void SpMM_N2M4_Kernel_API(   cudaStream_t stream,
 
     // 异步启动 GPU 上的主计算内核
     SpMM_N2M4_Kernel<N2M4TilingConfig, stages><<<GridDim, BlockDim, SHMEM_SZ, stream>>>(Compressed_A, metadata, B, C, M_Global, N_Global, K_Global, Split_K);
+    return cudaPeekAtLastError();
 }
 
 
@@ -135,37 +154,38 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
     // - TILE_K = mma_k * block_k_steps
     // - BLOCK_WARPS = block_row_warps * block_col_warps
     // - BLOCK_THREADS = 32 * BLOCK_WARPS
+    cudaError_t Error = cudaSuccess;
     switch (N_Global) {
         case 8:
             // <16,4,1,1,1,4> -> TILE_M=64, TILE_N=8, TILE_K=64, BLOCK_THREADS=128
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 1, 1, 4>, 2>(
+            Error = SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 1, 1, 4>, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         case 16:
             // <16,4,1,2,1,4> -> TILE_M=64, TILE_N=16, TILE_K=64, BLOCK_THREADS=128
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 2, 1, 4>, 2>(
+            Error = SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 2, 1, 4>, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         case 32:
             // <16,4,1,4,1,4> -> TILE_M=64, TILE_N=32, TILE_K=64, BLOCK_THREADS=128
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 4, 1, 4>, 2>(
+            Error = SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 4, 1, 4>, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         case 64:
             // <16,2,2,4,2,4> -> TILE_M=64, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 4, 2, 4>, 2>(
+            Error = SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 4, 2, 4>, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         case 128:
             // <16,2,2,4,4,4> -> TILE_M=128, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 4, 4, 4>, 2>(
+            Error = SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 4, 4, 4>, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;    
         // TODO 这里配置还要考虑一下        
         case 256:
             // 先复用 N=128 的保守配置；更激进的更宽 tile 需要单独验证正确性和资源占用。
             // <16,2,2,4,4,4> -> TILE_M=128, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 8, 4, 4>, 2>(
+            Error = SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 8, 4, 4>, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 512:
@@ -173,14 +193,14 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
             // <16,2,4,4,4,4> -> TILE_M=128, TILE_N=128, TILE_K=64, BLOCK_THREADS=256
             // Rebalance the same tile across warps so each warp carries fewer
             // B fragments from shared memory, targeting the current MIO stall.
-            // The 3-stage pipeline improved tensor activity without changing
-            // occupancy, so extend buffering once more for the same tile.
-            SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 4>(
+            // stages=4 would request 102400B dynamic shared memory for this
+            // tile, which exceeds the 101376B opt-in limit on sm86/A40.
+            Error = SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 1024:
             // <16,4,8,16,2,4> -> TILE_M=128, TILE_N=1024, TILE_K=64, BLOCK_THREADS=1024
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 8, 16, 2, 4>, 2>(
+            Error = SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 8, 16, 2, 4>, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         default:
@@ -189,7 +209,6 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
     }
     
     // 在内核启动后检查是否发生了错误
-    cudaError_t Error = cudaGetLastError();
     if (Error != cudaSuccess)
         return Error;
 
