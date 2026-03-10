@@ -16,7 +16,7 @@
 
 ## 2026-03-10 18:40 CST
 
-- Commit: pending
+- Commit: `099c986`
 - Change: revert the `N=512` dispatch in `src/SpMM_API.cu` back to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>`, and add dynamic shared-memory limit checks in `SpMM_N2M4_Kernel_API`.
 - Rationale: for `N2M4ConfigN128Balanced`, `stages=4` requests `102400` bytes of dynamic shared memory (`65536` for B, `32768` for A, `4096` for metadata), which exceeds the sm86/A40 opt-in limit of `101376` bytes. The previous code ignored `cudaFuncSetAttribute` failure, so an invalid configuration could slip through as a bogus near-zero runtime.
 - Status: pending cloud validation.
