@@ -37,6 +37,9 @@ static cudaError_t SpMM_N2M4_Kernel_API(   cudaStream_t stream,
 
     // PADDING_SHARED_MEM_FOR_C 在每个行的长度上额外增加了1个 float 元素的空间，用于消除 bank 冲突
     int resultSize = (N2M4TilingConfig::TILE_M * (N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C)) * sizeof(half);  // 计算结果的存储空间，注意这里是 half 类型
+    if (stages > 1)
+        computeSize -= ((N2M4TilingConfig::TILE_M * N2M4TilingConfig::TILE_K / 2)) / 4;
+
     int SHMEM_SZ = max(computeSize, resultSize);
 
     int device = 0;
@@ -199,9 +202,9 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
         case 1024:
             // The previous TILE_N=1024 / 1024-thread launch is invalid on sm86/A40:
             // its dynamic shared-memory request is 280576B, far above the 101376B
-            // opt-in limit. Reuse the proven 128x128x64 / 256-thread tile instead
-            // so N=1024 is covered by 8 blocks along N.
-            Error = SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 3>(
+            // opt-in limit. Keep the proven 128x128x64 / 256-thread tile, but
+            // use the slimmer metadata ring to make a 4-stage pipeline legal.
+            Error = SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 4>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         default:

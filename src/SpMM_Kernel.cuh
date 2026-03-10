@@ -403,6 +403,10 @@ __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  //
     const int PaddingKBlock    = RoundedKBlock - tileKBlockNum;
     // 如果是最后一个 Split_K，则需要减少相应的迭代次数
     int iterateK = 0;
+    constexpr int kMetadataStages = (stages > 1) ? (stages - 1) : 1;
+    constexpr int kSharedAStageElems = N2M4TilingConfig::TILE_M * N2M4TilingConfig::TILE_K / 2;
+    constexpr int kSharedBStageElems = N2M4TilingConfig::TILE_K * N2M4TilingConfig::TILE_N;
+    constexpr int kMetadataStageElems = N2M4TilingConfig::TILE_K / 16 * N2M4TilingConfig::TILE_M;
     if (IsLastsplitK)
         iterateK = AveragetileKBlock - PaddingKBlock;
     else
@@ -434,6 +438,9 @@ __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  //
     // uint32_t __restrict__ _metadata[N2M4TilingConfig::WARP_ROW_TENSORS];  // metadata
 
     // Register fragments are selected from the sparse MMA shape.
+    sharedMemMatrixB = &sharedMem[kSharedAStageElems * stages];
+    sharedMemMetadata = reinterpret_cast<uint16_t*>(&sharedMem[kSharedAStageElems * stages + kSharedBStageElems * stages]);
+
     typedef SparseComputePolicy<N2M4TilingConfig::MMA_K_SP, N2M4TilingConfig> ComputePolicy;
     typename ComputePolicy::ARegs _a;
     typename ComputePolicy::BRegs _b;
@@ -506,6 +513,12 @@ __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  //
 
         // COPY indicator
         // 判断是不是最后一个块，如果是最后一个块后续的读取操作就不继续进行
+        smem_write_metadata_PTR = sharedMemMetadata + ((tileIdxK + (stages-1)) % kMetadataStages) * kMetadataStageElems;
+        smem_read_metadata_PTR  = sharedMemMetadata + ((tileIdxK) % kMetadataStages) * kMetadataStageElems;
+        // Metadata is already resident in registers before the next async copy
+        // can recycle the same shared-memory slot.
+        metadata_FragLoadFromSharedToRegisters<N2M4TilingConfig::WARP_ROW_TENSORS>(_metadata, smem_read_metadata_PTR, warpStartRow);
+
         bool GlobalCopy = (tileIdxK + (stages-1)) < iterateK;
 
         if (GlobalCopy){
@@ -522,7 +535,7 @@ __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  //
         }
 
         // 加载 metadata 到寄存器
-        metadata_FragLoadFromSharedToRegisters<N2M4TilingConfig::WARP_ROW_TENSORS>(_metadata, smem_read_metadata_PTR, warpStartRow);
+        // Metadata for this tile is already in registers.
         // 执行计算
         ComputePolicy::run(c, _a, _b, _metadata, smem_read_A_PTR, smem_read_B_PTR, warpStartRow, warpStartCol);
 
