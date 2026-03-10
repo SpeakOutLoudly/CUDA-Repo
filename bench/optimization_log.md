@@ -40,4 +40,11 @@
 - Commit: `dcd5d90`
 - Change: restore the `N=512` dispatch in `src/SpMM_API.cu` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>`, and replace the previous naive direct-output store with a coalesced warp-shuffle implementation for the active `N2M4ConfigN128Balanced` path in `src/LoadAndStore.cuh`.
 - Rationale: the direct-store idea was only wrong because its write pattern doubled global-store sectors, not because bypassing shared memory was inherently bad. The best valid launch is still `N2M4ConfigN128Balanced, 3`, so the next single-variable step is to keep that launch fixed and retest only the output path with the same 128-bit row-wise store shape used by `StoreToGlobalMemoryFromShared`, but assembled directly from registers via warp shuffles. If this works, it should keep `l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum` near `131072` while eliminating the final shared-memory writeback and block-wide output barrier.
+- Result: regressed again on the cloud path. `bench/ncu/benchMain_20260310_201800.csv` keeps `l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum` at `131072`, but the active `SpMM_N2M4_Kernel` runtime still rises to `0.202477 ms`, tensor-pipe activity drops from `42.572486%` to `38.583723%`, `mio_throttle` rises from `1.374505` to `1.787415`, and `lts__t_sectors.sum` rises from `6691113.866667` to `7323068.066667`. The coalesced direct store fixed store coalescing, but the extra shuffle/store instruction overhead still made the kernel slower.
+
+## 2026-03-10 20:35 CST
+
+- Commit: `140fdbe`
+- Change: switch the `N=512` dispatch in `src/SpMM_API.cu` from `SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 3>`.
+- Rationale: both direct-output store experiments are now dead ends, so the next safe step is to stop touching the output path and return to launch-policy search on the recovered 3-stage kernel. This keeps the same `128x128x64` tile and the same 3-stage `cp.async` depth that previously helped, but swaps the warp decomposition from `2x4` back to `4x2`. That changes only which side of the tile each warp carries more fragments for, and it automatically bypasses the direct-store specialization because that specialization only matches `N2M4ConfigN128Balanced`.
 - Status: pending cloud validation.
