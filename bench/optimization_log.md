@@ -55,3 +55,10 @@
 - Change: switch the `N=1024` dispatch in `src/SpMM_API.cu` from `SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 8, 16, 2, 4>, 2>` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 3>`.
 - Rationale: the old `N=1024` launch is not just slow, it is invalid. Its `TILE_N=1024 / BLOCK_THREADS=1024` shape requests `280576B` of dynamic shared memory, which exceeds the sm86/A40 opt-in limit of `101376B`, so the main kernel never launches and the near-zero `n2m4` runtime is bogus. The first valid recovery step is to reuse the already-proven `128x128x64 / 256-thread / stage3` tile so `N=1024` is split across 8 blocks in N while staying under the shared-memory limit.
 - Status: pending cloud validation.
+
+## 2026-03-10 21:45 CST
+
+- Commit: `6cc2519`
+- Change: shrink the shared-memory metadata ring in `src/SpMM_Kernel.cuh` from `stages` to `stages-1`, load the current tile's metadata into registers before issuing the future-stage metadata copy, and switch the `N=1024` dispatch in `src/SpMM_API.cu` from `SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 3>` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 4>`.
+- Rationale: the latest valid `N=1024` report `bench/ncu/benchMain_20260310_211811.csv` shows the active `SpMM_N2M4_Kernel<N2M4ConfigN128Wide, 3>` already matching cuSPARSELt on global traffic (`GlobalLd=13107200`, `GlobalSt=262144`, `L2≈13.38M`) but still trailing in execution efficiency (`tensor=44.245%` vs `48.207%`, `barrier=1.315` vs `0.334`, `mio=1.453` vs `0.024`). That points at the inner shared-memory / synchronization pipeline, not DRAM reuse. The current kernel also keeps a full `stages`-deep metadata ring even though each tile's metadata is consumed entirely from registers before compute. Reusing that shared slot one iteration earlier saves one metadata stage from dynamic shared memory and makes the `128x128x64` wide tile legal at `stages=4` on sm86/A40.
+- Status: pending cloud validation.
