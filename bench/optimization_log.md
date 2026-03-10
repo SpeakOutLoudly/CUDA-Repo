@@ -26,4 +26,11 @@
 - Commit: `fb62106`
 - Change: add a direct register-to-global output store path for the active `N=512` config `N2M4TilingConfig<16, 2, 4, 4, 4, 4>` in `src/SpMM_Kernel.cuh`, backed by a new `StoreToGlobalMemoryFromRegister_half` helper in `src/LoadAndStore.cuh`.
 - Rationale: the current `stages=3` kernel is still paying a final `register -> shared -> global` round-trip plus a block-wide `__syncthreads()` even though each warp owns a disjoint output subtile. The latest NCU still shows `barrier=1.652997`, `mio=1.374762`, and `smsp__sass_inst_executed_op_shared_st.sum=32768`, so the next single-variable step is to remove that shared-memory writeback path only for the active `N=512` tile.
+- Result: regressed on the cloud path. `bench/ncu/benchMain_20260310_193329.csv` shows the active `SpMM_N2M4_Kernel` runtime rising from `0.180666 ms` to `0.185764 ms` even though `smsp__sass_inst_executed_op_shared_st.sum` dropped from `32768` to `0`, because `l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum` doubled from `131072` to `262144`. The direct stores removed the shared-memory writeback, but they also broke the coalesced global-store pattern and lost throughput.
+
+## 2026-03-10 20:00 CST
+
+- Commit: `addb772`
+- Change: switch the `N=512` dispatch in `src/SpMM_API.cu` from `SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Compact, 2>`.
+- Rationale: after the direct-store regression, the best known valid baseline is still the shared-store `N2M4ConfigN128Balanced, 3` kernel. Its latest valid NCU (`bench/ncu/benchMain_20260310_185126.csv`) is limited by `wait=2.035946`, `math_pipe_throttle=1.944977`, `barrier=1.636837`, and `shared_mem_per_block=77.824 KB`, which locks it to one resident block per SM. The `128x64x64 / 128-thread / stage2` launch cuts dynamic shared memory to `34816B`, enabling two resident blocks per SM on sm86/A40 while keeping B/global-store traffic per output tile unchanged; the tradeoff is only extra A/metadata traffic along N, which is the cheaper side of the reuse loss.
 - Status: pending cloud validation.
