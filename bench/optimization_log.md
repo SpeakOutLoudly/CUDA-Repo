@@ -19,4 +19,11 @@
 - Commit: `099c986`
 - Change: revert the `N=512` dispatch in `src/SpMM_API.cu` back to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>`, and add dynamic shared-memory limit checks in `SpMM_N2M4_Kernel_API`.
 - Rationale: for `N2M4ConfigN128Balanced`, `stages=4` requests `102400` bytes of dynamic shared memory (`65536` for B, `32768` for A, `4096` for metadata), which exceeds the sm86/A40 opt-in limit of `101376` bytes. The previous code ignored `cudaFuncSetAttribute` failure, so an invalid configuration could slip through as a bogus near-zero runtime.
+- Result: cloud bench recovered to `n2m4 0.13425 ms / 127.97 TFLOPs / ErrorRate 0.00`, versus `cusparseLt 0.14500 ms / 118.48 TFLOPs / ErrorRate 0.00`. The latest valid NCU `bench/ncu/benchMain_20260310_185126.csv` is effectively identical to the prior `stages=3` report, so pipeline-depth tuning is exhausted for this tile.
+
+## 2026-03-10 19:05 CST
+
+- Commit: pending
+- Change: add a direct register-to-global output store path for the active `N=512` config `N2M4TilingConfig<16, 2, 4, 4, 4, 4>` in `src/SpMM_Kernel.cuh`, backed by a new `StoreToGlobalMemoryFromRegister_half` helper in `src/LoadAndStore.cuh`.
+- Rationale: the current `stages=3` kernel is still paying a final `register -> shared -> global` round-trip plus a block-wide `__syncthreads()` even though each warp owns a disjoint output subtile. The latest NCU still shows `barrier=1.652997`, `mio=1.374762`, and `smsp__sass_inst_executed_op_shared_st.sum=32768`, so the next single-variable step is to remove that shared-memory writeback path only for the active `N=512` tile.
 - Status: pending cloud validation.

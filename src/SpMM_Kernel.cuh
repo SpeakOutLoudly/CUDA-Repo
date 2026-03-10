@@ -340,6 +340,39 @@ struct SparseComputePolicy<32, N2M4TilingConfig> {
     }
 };
 
+template<typename N2M4TilingConfig>
+struct OutputStorePolicy {
+    static constexpr bool kUseDirectStore = false;
+
+    __device__ __forceinline__ static void run(
+        half* __restrict__ sharedMem,
+        half* __restrict__ blockGlobalPTR,
+        int N_Global,
+        float c[][REG_PER_C_TENSOR_16_8])
+    {
+        __syncthreads();
+        half(*smem_CFrag)[N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C] =
+            reinterpret_cast<half(*)[N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C]>(sharedMem);
+        StoreToSharedMemoryFromRegister_half<N2M4TilingConfig>(smem_CFrag, c);
+        StoreToGlobalMemoryFromShared<N2M4TilingConfig>(smem_CFrag, blockGlobalPTR, N_Global);
+    }
+};
+
+template<>
+struct OutputStorePolicy<N2M4TilingConfig<16, 2, 4, 4, 4, 4>> {
+    static constexpr bool kUseDirectStore = true;
+
+    __device__ __forceinline__ static void run(
+        half* __restrict__ /*sharedMem*/,
+        half* __restrict__ blockGlobalPTR,
+        int N_Global,
+        float c[][REG_PER_C_TENSOR_16_8])
+    {
+        StoreToGlobalMemoryFromRegister_half<N2M4TilingConfig<16, 2, 4, 4, 4, 4>>(
+            blockGlobalPTR, N_Global, c);
+    }
+};
+
 template<typename N2M4TilingConfig, int stages>
 __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  // 
                                     const uint16_t* metadata,
@@ -512,6 +545,12 @@ __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  //
     // 把 smem 这个 half* 指针，当作一个指向数组的指针来看待
     // 这个数组的每个元素本身又是一个大小为 TILE_N + PADDING_SHARED_MEM_FOR_C 的 half 数组
     // 注意这里进行存储的时候保存成行主序
+
+    if (OutputStorePolicy<N2M4TilingConfig>::kUseDirectStore) {
+        half* BlockGlobalPTR = C + splitK_Idx * (M_Global * N_Global) + tileStartRow * N_Global + tileStartCol;
+        OutputStorePolicy<N2M4TilingConfig>::run(sharedMem, BlockGlobalPTR, N_Global, c);
+        return;
+    }
 
     __syncthreads();
     half(*smem_CFrag)[N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C] = reinterpret_cast<half(*)[N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C]>(sharedMem);

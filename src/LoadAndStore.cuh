@@ -425,6 +425,48 @@ StoreToSharedMemoryFromRegister_half(   half (*smem_CFrag)[N2M4TilingConfig::TIL
 
 // 将 shared memory 结果写回 Global Memory，这里 shared memory 中的数据类型为 half
 // if constexpr 的写法不适用于 C++ 11
+template<typename N2M4TilingConfig>
+__device__ __forceinline__ void
+StoreToGlobalMemoryFromRegister_half(   half* __restrict__ BlockGlobalPTR,
+                                        int N_Global,
+                                        float c[][REG_PER_C_TENSOR_16_8])
+{
+    const unsigned int warpId = threadIdx.x / WARP_SIZE;
+    const int warpIdxM = warpId / N2M4TilingConfig::BLOCK_COL_WARPS;
+    const int warpIdxN = warpId % N2M4TilingConfig::BLOCK_COL_WARPS;
+    const int warpRowOffset =
+        warpIdxM * (N2M4TilingConfig::MMA_M_SP * N2M4TilingConfig::WARP_ROW_TENSORS);
+    const int warpColOffset =
+        warpIdxN * (N2M4TilingConfig::MMA_N_SP * N2M4TilingConfig::WARP_COL_TENSORS);
+    const int lane_id = threadIdx.x % WARP_SIZE;
+
+    const int col_base = (lane_id % 4) * 2;
+    const int row0 = lane_id / 4;
+    const int row1 = row0 + 8;
+
+    #pragma unroll
+    for (int i = 0; i < N2M4TilingConfig::WARP_ROW_TENSORS; i++) {
+    #pragma unroll
+        for (int j = 0; j < N2M4TilingConfig::WARP_COL_TENSORS; j++) {
+            const int regSetId = i * N2M4TilingConfig::WARP_COL_TENSORS + j;
+            const int tensorRow = warpRowOffset + i * N2M4TilingConfig::MMA_M_SP;
+            const int tensorCol = warpColOffset + j * N2M4TilingConfig::MMA_N_SP;
+
+            half* dst0 =
+                BlockGlobalPTR + (tensorRow + row0) * N_Global + tensorCol + col_base;
+            half* dst1 =
+                BlockGlobalPTR + (tensorRow + row1) * N_Global + tensorCol + col_base;
+
+            *reinterpret_cast<half2*>(dst0) =
+                __halves2half2(__float2half_rn(c[regSetId][0]),
+                               __float2half_rn(c[regSetId][1]));
+            *reinterpret_cast<half2*>(dst1) =
+                __halves2half2(__float2half_rn(c[regSetId][2]),
+                               __float2half_rn(c[regSetId][3]));
+        }
+    }
+}
+
 // template<typename N2M4TilingConfig>
 // __device__ __forceinline__ void
 // StoreToGlobalMemoryFromShared_V0(  half (*smem_CFrag)[N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C],  // 注意这里是行主序
