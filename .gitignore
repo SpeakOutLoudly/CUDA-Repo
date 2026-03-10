@@ -5,6 +5,7 @@
 *.out
 *.d
 *.elf
+*.pyc
 
 # Executables
 kernelTest
@@ -19,6 +20,10 @@ kernelTest
 *.log
 core
 core.*
+
+bench/bin
+bench/obj
+bench/ncu
 
 # CUDA / temporary profiling folders
 test/nsys/
