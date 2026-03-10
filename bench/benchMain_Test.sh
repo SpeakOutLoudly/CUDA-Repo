@@ -9,6 +9,7 @@ NCU_PATH="${NCU_PATH:-/usr/local/cuda/bin/ncu}"
 PROG_PATH="${PROG_PATH:-$SCRIPT_DIR/bin/benchMain}"
 REPORT_DIR="${REPORT_DIR:-$SCRIPT_DIR/ncu}"
 REPORT_BASENAME="${REPORT_BASENAME:-benchMain}"
+CSV_PAGE="${CSV_PAGE:-raw}"
 CUDA_DEVICE="${CUDA_VISIBLE_DEVICES:-0}"
 USE_SUDO="${USE_SUDO:-1}"
 
@@ -30,6 +31,7 @@ Environment variables:
   PROG_PATH=...            Executable to profile (default: ./bin/benchMain)
   REPORT_DIR=...           Report output directory (default: ./ncu)
   REPORT_BASENAME=...      Report filename prefix (default: benchMain)
+  CSV_PAGE=raw             ncu report page to export as CSV (default: raw)
   USE_SUDO=1               Run ncu via sudo when set to 1 (default: 1)
 EOF
 }
@@ -52,12 +54,17 @@ else
     exit 1
 fi
 
+if [[ "$USE_SUDO" == "1" ]]; then
+    echo "Requesting sudo permission for Nsight Compute..."
+    sudo -v
+fi
+
 mkdir -p "$REPORT_DIR"
 
-echo "[1/4] make clean"
+echo "[1/5] make clean"
 make clean
 
-echo "[2/4] make"
+echo "[2/5] make"
 make
 
 if [[ ! -x "$PROG_PATH" ]]; then
@@ -70,10 +77,12 @@ if [[ ! -x "$NCU_PATH" ]]; then
     exit 1
 fi
 
-echo "[3/4] run benchmark"
+echo "[3/5] run benchmark"
 "$PROG_PATH" "$M" "$K" "$N" "$SPLIT_K"
 
 REPORT_NAME="${REPORT_BASENAME}_$(date +%Y%m%d_%H%M%S).ncu-rep"
+REPORT_PATH="$REPORT_DIR/$REPORT_NAME"
+CSV_PATH="${REPORT_PATH%.ncu-rep}.csv"
 
 NCU_CMD=(
     "$NCU_PATH"
@@ -89,13 +98,13 @@ NCU_CMD=(
     --section SpeedOfLight_RooflineChart
     --section Occupancy
     --section SourceCounters
-    -o "$REPORT_DIR/$REPORT_NAME"
+    -o "$REPORT_PATH"
     "$PROG_PATH" "$M" "$K" "$N" "$SPLIT_K"
 )
 
-echo "[4/4] ncu profile"
+echo "[4/5] ncu profile"
 echo "Command target: $PROG_PATH $M $K $N $SPLIT_K"
-echo "Report path: $REPORT_DIR/$REPORT_NAME"
+echo "Report path: $REPORT_PATH"
 
 if [[ "$USE_SUDO" == "1" ]]; then
     sudo env CUDA_VISIBLE_DEVICES="$CUDA_DEVICE" "${NCU_CMD[@]}"
@@ -103,4 +112,8 @@ else
     CUDA_VISIBLE_DEVICES="$CUDA_DEVICE" "${NCU_CMD[@]}"
 fi
 
-echo "Nsight Compute report saved to: $REPORT_DIR/$REPORT_NAME"
+echo "[5/5] export CSV"
+"$NCU_PATH" --import "$REPORT_PATH" --csv --page "$CSV_PAGE" > "$CSV_PATH"
+
+echo "Nsight Compute report saved to: $REPORT_PATH"
+echo "CSV export saved to: $CSV_PATH"
