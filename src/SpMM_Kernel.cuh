@@ -297,6 +297,49 @@ __device__ __forceinline__ void PipelinedCoreComputations_K16(  float c[][REG_PE
 // __global__ 函数，是从CPU端启动的GPU内核的入口函数
 // 控制内存管理、数据流控制、软件流水线以及最终结果的写回
 // V1 给 metadata 添加双缓冲区，减少__syncthreads()
+template<int MMA_K_SP, typename N2M4TilingConfig>
+struct SparseComputePolicy;
+
+template<typename N2M4TilingConfig>
+struct SparseComputePolicy<16, N2M4TilingConfig> {
+    typedef uint32_t ARegs[N2M4TilingConfig::WARP_ROW_TENSORS * 2][2];
+    typedef uint32_t BRegs[N2M4TilingConfig::WARP_COL_TENSORS * 2][2];
+
+    __device__ __forceinline__ static void run(
+        float c[][REG_PER_C_TENSOR_16_8],
+        ARegs a,
+        BRegs b,
+        uint32_t metadata[],
+        half* __restrict__ sharedMemA,
+        half* __restrict__ sharedMemB,
+        int warpStartRow,
+        int warpStartCol)
+    {
+        PipelinedCoreComputations_K16<N2M4TilingConfig>(
+            c, a, b, metadata, sharedMemA, sharedMemB, warpStartRow, warpStartCol);
+    }
+};
+
+template<typename N2M4TilingConfig>
+struct SparseComputePolicy<32, N2M4TilingConfig> {
+    typedef uint32_t ARegs[N2M4TilingConfig::WARP_ROW_TENSORS][4];
+    typedef uint32_t BRegs[N2M4TilingConfig::WARP_COL_TENSORS][4];
+
+    __device__ __forceinline__ static void run(
+        float c[][REG_PER_C_TENSOR_16_8],
+        ARegs a,
+        BRegs b,
+        uint32_t metadata[],
+        half* __restrict__ sharedMemA,
+        half* __restrict__ sharedMemB,
+        int warpStartRow,
+        int warpStartCol)
+    {
+        PipelinedCoreComputations<N2M4TilingConfig>(
+            c, a, b, metadata, sharedMemA, sharedMemB, warpStartRow, warpStartCol);
+    }
+};
+
 template<typename N2M4TilingConfig, int stages>
 __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  // 
                                     const uint16_t* metadata,
@@ -357,9 +400,10 @@ __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  //
     // uint32_t __restrict__ _b[N2M4TilingConfig::WARP_COL_TENSORS][4];  // 稠密矩阵
     // uint32_t __restrict__ _metadata[N2M4TilingConfig::WARP_ROW_TENSORS];  // metadata
 
-    // K16 使用双缓冲区
-    uint32_t __restrict__ _a[N2M4TilingConfig::WARP_ROW_TENSORS*2][2];  // 稀疏矩阵
-    uint32_t __restrict__ _b[N2M4TilingConfig::WARP_COL_TENSORS*2][2];  // 稠密矩阵
+    // Register fragments are selected from the sparse MMA shape.
+    typedef SparseComputePolicy<N2M4TilingConfig::MMA_K_SP, N2M4TilingConfig> ComputePolicy;
+    typename ComputePolicy::ARegs _a;
+    typename ComputePolicy::BRegs _b;
     uint32_t __restrict__ _metadata[N2M4TilingConfig::WARP_ROW_TENSORS];  // metadata
 
     // 确定全局内存中的数据起始地址
@@ -447,7 +491,7 @@ __global__ void SpMM_N2M4_Kernel(   const half* Compressed_A,  //
         // 加载 metadata 到寄存器
         metadata_FragLoadFromSharedToRegisters<N2M4TilingConfig::WARP_ROW_TENSORS>(_metadata, smem_read_metadata_PTR, warpStartRow);
         // 执行计算
-        PipelinedCoreComputations_K16<N2M4TilingConfig>(c, _a, _b, _metadata, smem_read_A_PTR, smem_read_B_PTR, warpStartRow, warpStartCol);
+        ComputePolicy::run(c, _a, _b, _metadata, smem_read_A_PTR, smem_read_B_PTR, warpStartRow, warpStartCol);
 
         if (GlobalCopy){
             cp_async_wait_group<stages - 2>();  // 数据加载完成

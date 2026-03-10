@@ -109,3 +109,4 @@ struct SpKLoopConfig {
 using N2M4ConfigN64Default = N2M4TilingConfig<16, 2, 2, 4, 2, 4>;
 using N2M4ConfigN128Compact = N2M4TilingConfig<16, 2, 2, 4, 4, 4>;
 using N2M4ConfigN128Wide = N2M4TilingConfig<16, 4, 2, 8, 2, 4>;
+using N2M4ConfigN128WideK32 = N2M4TilingConfig<32, 4, 2, 8, 2, 2>;

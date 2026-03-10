@@ -169,11 +169,12 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 512:
-            // 先复用 N=128 的保守配置；通过增加 grid 在 N 方向的 block 数覆盖更大的输出宽度。
-            // <16,2,2,4,4,4> -> TILE_M=128, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
-            // Favor N-direction parallelism for large-N cases to reduce per-warp
-            // accumulator pressure while keeping a 256-thread block.
-            SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 2>(
+            // Keep a 128x128x64 tile and a 256-thread block for large-N cases.
+            // <32,4,2,8,2,2> -> TILE_M=128, TILE_N=128, TILE_K=64, BLOCK_THREADS=256
+            // Keep the 128x128x64 tile geometry, but switch the N=512 path to
+            // m16n8k32 sparse MMA so each warp does fewer fragment loads and
+            // metadata hand-offs for the same K coverage.
+            SpMM_N2M4_Kernel_API<N2M4ConfigN128WideK32, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 1024:
