@@ -423,7 +423,6 @@ StoreToSharedMemoryFromRegister_half(   half (*smem_CFrag)[N2M4TilingConfig::TIL
     }
 }
 
-
 // 将 shared memory 结果写回 Global Memory，这里 shared memory 中的数据类型为 half
 // if constexpr 的写法不适用于 C++ 11
 // template<typename N2M4TilingConfig>
