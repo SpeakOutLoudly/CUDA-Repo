@@ -409,21 +409,16 @@ StoreToSharedMemoryFromRegister_half(   half (*smem_CFrag)[N2M4TilingConfig::TIL
             const int row0 = lane_id / 4;
             const int row1 = row0 + 8;
 
-            // r=0 -> (row0, col_base+0)
-            (*(smem_CFrag + Tensor_i_offset + row0))[Tensor_j_offset + col_base + 0] =
-                __float2half_rn(c[RegSetID][0]);
+            // Store adjacent FP16 outputs as half2 to reduce shared-store traffic.
+            *reinterpret_cast<half2*>(
+                &(*(smem_CFrag + Tensor_i_offset + row0))[Tensor_j_offset + col_base]) =
+                __halves2half2(__float2half_rn(c[RegSetID][0]),
+                               __float2half_rn(c[RegSetID][1]));
 
-            // r=1 -> (row0, col_base+1)
-            (*(smem_CFrag + Tensor_i_offset + row0))[Tensor_j_offset + col_base + 1] =
-                __float2half_rn(c[RegSetID][1]);
-
-            // r=2 -> (row1, col_base+0)
-            (*(smem_CFrag + Tensor_i_offset + row1))[Tensor_j_offset + col_base + 0] =
-                __float2half_rn(c[RegSetID][2]);
-
-            // r=3 -> (row1, col_base+1)
-            (*(smem_CFrag + Tensor_i_offset + row1))[Tensor_j_offset + col_base + 1] =
-                __float2half_rn(c[RegSetID][3]);
+            *reinterpret_cast<half2*>(
+                &(*(smem_CFrag + Tensor_i_offset + row1))[Tensor_j_offset + col_base]) =
+                __halves2half2(__float2half_rn(c[RegSetID][2]),
+                               __float2half_rn(c[RegSetID][3]));
         }
     }
 }
