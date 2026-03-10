@@ -197,8 +197,11 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 1024:
-            // <16,4,8,16,2,4> -> TILE_M=128, TILE_N=1024, TILE_K=64, BLOCK_THREADS=1024
-            Error = SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 8, 16, 2, 4>, 2>(
+            // The previous TILE_N=1024 / 1024-thread launch is invalid on sm86/A40:
+            // its dynamic shared-memory request is 280576B, far above the 101376B
+            // opt-in limit. Reuse the proven 128x128x64 / 256-thread tile instead
+            // so N=1024 is covered by 8 blocks along N.
+            Error = SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 3>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         default:
