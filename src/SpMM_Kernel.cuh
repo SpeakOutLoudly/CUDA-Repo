@@ -108,7 +108,6 @@ __device__ __forceinline__ void PipelinedCoreComputations_K16(  float c[][REG_PE
                 }
             }
         }
-
     }
 }
 

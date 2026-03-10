@@ -1,14 +1,21 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <vector>
-
+#include <stdio.h>
 #include "TileConfig.h"        // 使用 Tile 配置与派生常量
 #include "reduce_Kernel.cuh"
 #include "SpMM_Kernel.cuh"
+
+template<typename N2M4TilingConfig, int stages>
+static void SpMM_N2M4_Kernel_API(cudaStream_t stream,
+                                 const half* Compressed_A,
+                                 const half* B,
+                                 const uint16_t* metadata,
+                                 half* C,
+                                 int M_Global,
+                                 int N_Global,
+                                 int K_Global,
+                                 int Split_K);
 
 
 // cuda 的启动函数
@@ -114,43 +121,67 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
     // ----------------------------debug 测试------------------------------- //
 
 
-
-
-    // Batched SpMM
-    // 启动 SpMM 矩阵乘计算 Kernel
-    // WARP_COL_TENSORS 是唯一在不同 case 中变化的关键参数。它决定了一个 Warp 沿 N 方向（列方向）执行多少次 MMA 矩阵乘法，从而直接影响了 TILE_N 的大小
-    // int _K,                    // 一般使用 32
-    // int _BLOCK_ROW_WARPS,
-    // int _BLOCK_COL_WARPS,
-    // int _WARP_COL_TENSORS,
-    // int _WARP_ROW_TENSORS = 1,  // warp 在 M 方向并行 tensor 数，默认为1
-    // int _BLOCK_K_STEPS = 2      // 可选：默认 2 次 mma
+    // N2M4TilingConfig<mma_k, block_row_warps, block_col_warps, warp_col_tensors, warp_row_tensors, block_k_steps>
+    // 各参数含义：
+    // - mma_k: 单次 mma 指令在 K 方向处理的长度
+    // - block_row_warps: 一个 thread block 在 M 方向排布的 warp 数
+    // - block_col_warps: 一个 thread block 在 N 方向排布的 warp 数
+    // - warp_col_tensors: 单个 warp 在 N 方向负责的 mma tile 数
+    // - warp_row_tensors: 单个 warp 在 M 方向负责的 mma tile 数
+    // - block_k_steps: 一个 block 在 K 方向累计的 mma 步数
+    // 派生关系：
+    // - TILE_M = 16 * (warp_row_tensors * block_row_warps)
+    // - TILE_N = 8  * (warp_col_tensors * block_col_warps)
+    // - TILE_K = mma_k * block_k_steps
+    // - BLOCK_WARPS = block_row_warps * block_col_warps
+    // - BLOCK_THREADS = 32 * BLOCK_WARPS
     switch (N_Global) {
         case 8:
-            // SpMM_N2M4_Kernel_API<N2M4TilingConfig<32, 4, 1, 1, 1, 2>>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 1, 1, 4>, 2>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
+            // <16,4,1,1,1,4> -> TILE_M=64, TILE_N=8, TILE_K=64, BLOCK_THREADS=128
+            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 1, 1, 4>, 2>(
+                stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         case 16:
-            // SpMM_N2M4_Kernel_API<N2M4TilingConfig<32, 4, 1, 2, 1, 2>>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 2, 1, 4>, 2>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
+            // <16,4,1,2,1,4> -> TILE_M=64, TILE_N=16, TILE_K=64, BLOCK_THREADS=128
+            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 2, 1, 4>, 2>(
+                stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         case 32:
-            // SpMM_N2M4_Kernel_API<N2M4TilingConfig<32, 4, 1, 4, 1, 2>>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 4, 1, 4>, 2>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
+            // <16,4,1,4,1,4> -> TILE_M=64, TILE_N=32, TILE_K=64, BLOCK_THREADS=128
+            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 1, 4, 1, 4>, 2>(
+                stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         case 64:
-            // SpMM_N2M4_Kernel_API<N2M4TilingConfig<32, 2, 2, 4, 2, 2>>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 4, 2, 4>, 2>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
+            // <16,2,2,4,2,4> -> TILE_M=64, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
+            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 4, 2, 4>, 2>(
+                stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         case 128:
-            // warps = 4*2
-            // TILE_M = 4*2*16 = 128 
-            // TILE_N = 2*8*8 = 128
-            // SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 2, 8, 2, 4>>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
-            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 4, 4, 4>, 2>(stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
+            // <16,2,2,4,4,4> -> TILE_M=128, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
+            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 4, 4, 4>, 2>(
+                stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
+            break;    
+        // TODO 这里配置还要考虑一下        
+        case 256:
+            // 先复用 N=128 的保守配置；更激进的更宽 tile 需要单独验证正确性和资源占用。
+            // <16,2,2,4,4,4> -> TILE_M=128, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
+            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 8, 4, 4>, 2>(
+                stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
+            break;  
+        case 512:
+            // 先复用 N=128 的保守配置；通过增加 grid 在 N 方向的 block 数覆盖更大的输出宽度。
+            // <16,2,2,4,4,4> -> TILE_M=128, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
+            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 2, 2, 8, 8, 4>, 2>(
+                stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
+            break;  
+        case 1024:
+            // <16,4,8,16,2,4> -> TILE_M=128, TILE_N=1024, TILE_K=64, BLOCK_THREADS=1024
+            SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 8, 16, 2, 4>, 2>(
+                stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;
         default:
-            break;
+            printf("[SpMM] unsupported N_Global=%d.\n", N_Global);
+            return cudaErrorInvalidValue;
     }
     
     // 在内核启动后检查是否发生了错误
@@ -163,7 +194,7 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
         return Error;
 
     // 重新分配 Grid 和 Block，启动 Split_k 规约计算的内核
-    dim3 GridDim((M_Global * N_Global) / 256, 1, 1);
+    dim3 GridDim(max((M_Global * N_Global) / 256, 1), 1, 1);
     dim3 BlockDim(WARP_SIZE, 1, 1);
     SplitK_Reduction<<<GridDim, BlockDim, 0, stream>>>(C, KernelOutputPtr, M_Global, N_Global, Split_K);
     return cudaGetLastError();

@@ -19,7 +19,9 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
                                 half* C,                        // M×N，row-major
                                 const int    M_Global,
                                 const int    N_Global,
-                                const int    K_Global);
+                                const int    K_Global,
+                                half*        Split_Reduction,
+                                const int    Split_K);
 
 
 

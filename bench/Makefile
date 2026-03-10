@@ -55,18 +55,43 @@ HEAD_FILES = ../build/SpMM_API.cuh \
 			 ../src/TileConfig.h \
 			 ../src/reduce_Kernel.cuh
 
-# Target rules
-all: benchMain
+BIN_DIR ?= ./bin
+OBJ_DIR ?= ./obj
 
-benchMain: main.o
+# Target rules
+BENCH_NAMES := bench_n2m4 bench_cublas bench_cusparseLt
+BENCH_TARGETS := $(addprefix $(BIN_DIR)/,$(BENCH_NAMES))
+BENCH_OBJECTS := $(addprefix $(OBJ_DIR)/,$(addsuffix .o,$(BENCH_NAMES)))
+MAIN_TARGET := $(BIN_DIR)/benchMain
+MAIN_OBJECT := $(OBJ_DIR)/main.o
+SPMM_API_OBJECT := $(OBJ_DIR)/SpMM_API.o
+
+.PHONY: all bench clean
+.SECONDARY: $(MAIN_OBJECT) $(BENCH_OBJECTS) $(SPMM_API_OBJECT)
+
+all: $(MAIN_TARGET) $(BENCH_TARGETS)
+
+bench: $(BENCH_TARGETS)
+
+$(BIN_DIR) $(OBJ_DIR):
+	mkdir -p $@
+
+benchMain: $(MAIN_TARGET)
+
+$(MAIN_TARGET): $(MAIN_OBJECT) | $(BIN_DIR)
 	$(EXEC) $(NVCC) $(ALL_LDFLAGS) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)
 
-main.o: main.cu $(HEAD_FILES)
+$(BIN_DIR)/%: $(OBJ_DIR)/%.o | $(BIN_DIR)
+	$(EXEC) $(NVCC) $(ALL_LDFLAGS) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)
+
+$(MAIN_OBJECT): main.cu $(HEAD_FILES) | $(OBJ_DIR)
 	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
-SpMM_API.o:  ../src/SpMM_API.cu $(HEAD_FILES)  
+$(OBJ_DIR)/%.o: %.cu $(HEAD_FILES) | $(OBJ_DIR)
 	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
+$(SPMM_API_OBJECT): ../src/SpMM_API.cu $(HEAD_FILES) | $(OBJ_DIR)
+	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 clean:
-	rm -f main.so main.o benchMain
+	rm -rf $(BIN_DIR) $(OBJ_DIR)

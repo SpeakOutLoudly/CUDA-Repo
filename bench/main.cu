@@ -33,6 +33,7 @@ int main(int argc, char** argv){
     int SPLIT_K  = atoi(argv[4]);
 
     printf("M_GLOBAL: %d, K_GLOBAL: %d, N_GLOBAL: %d, SPLIT_K: %d \n", M_GLOBAL, K_GLOBAL, N_GLOBAL, SPLIT_K);
+    PrintTrialCase("benchMain", M_GLOBAL, K_GLOBAL, N_GLOBAL, SPLIT_K);
 
     // cublasStatus_t cublas_status;
     cudaEvent_t start, stop;
@@ -264,25 +265,34 @@ int main(int argc, char** argv){
     // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 //
     // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 // // 统计计算准确率以及kernel性能 //
 
-    int preview_count = 256;
-    printf("cublasResult_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
-    for (int i = 128; i < preview_count; ++i) {
-        printf("%.4f ", __half2float(cublasResult_host[i]));
+    /*
+    int preview_count = GetEnvIntOrDefault("SPMM_PREVIEW_COUNT", 16);
+    int total_elements = M_GLOBAL * N_GLOBAL;
+    if (preview_count > total_elements) {
+        preview_count = total_elements;
     }
-    printf("\n");
 
-    printf("result_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
-    for (int i = 128; i < preview_count; ++i) {
-        printf("%.4f ", __half2float(result_host[i]));
+    if (preview_count > 0) {
+        printf("cublasResult_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
+        for (int i = 0; i < preview_count; ++i) {
+            printf("%.4f ", __half2float(cublasResult_host[i]));
+        }
+        printf("\n");
+
+        printf("result_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
+        for (int i = 0; i < preview_count; ++i) {
+            printf("%.4f ", __half2float(result_host[i]));
+        }
+        printf("\n");
+
+        printf("cusparseLtResult_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
+        for (int i = 0; i < preview_count; ++i) {
+            printf("%.4f ", __half2float(cusparseLtResult_host[i]));
+        }
+        printf("\n");
     }
-    printf("\n");
-
-    printf("cusparseLtResult_host shape: [%d, %d], first %d elements: ", M_GLOBAL, N_GLOBAL, preview_count);
-    for (int i = 128; i < preview_count; ++i) {
-        printf("%.4f ", __half2float(cusparseLtResult_host[i]));
-    }
-    printf("\n");
-
+    */
+    
     int totalErrorNums = 0;
     totalErrorNums = ComputeTotalError(cublasResult_host, result_host, M_GLOBAL, N_GLOBAL, true);  // 统计我设计的kernel的准确率
 

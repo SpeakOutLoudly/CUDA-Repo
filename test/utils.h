@@ -6,6 +6,7 @@
 #include <algorithm> 
 #include <fstream>
 #include <random>
+#include <cstdlib>
 
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -234,9 +235,47 @@ __host__ void toolPackMatrixB(  half* MatrixB,  // matrixB 是行主序存储的
 // 统计kernel计算正确性 // // 统计kernel计算正确性 // // 统计kernel计算正确性 // // 统计kernel计算正确性 // 
 // 统计kernel计算正确性 // // 统计kernel计算正确性 // // 统计kernel计算正确性 // // 统计kernel计算正确性 // 
 
+const char* GetEnvStringOrDefault(const char* name, const char* fallback)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    return value;
+}
+
+int GetEnvIntOrDefault(const char* name, int fallback)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+
+    char* end_ptr = nullptr;
+    long parsed = std::strtol(value, &end_ptr, 10);
+    if (end_ptr == value || *end_ptr != '\0') {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
+}
+
+void PrintTrialCase(const char* program_name, int M, int K, int N, int split_k)
+{
+    printf("[TrialCase] program=%s role=%s trial_id=%s sms=%s tile_config=%s M=%d K=%d N=%d SPLIT_K=%d\n",
+           program_name,
+           GetEnvStringOrDefault("SPMM_RUN_ROLE", "manual"),
+           GetEnvStringOrDefault("SPMM_TRIAL_ID", "none"),
+           GetEnvStringOrDefault("SPMM_BUILD_SMS", "unknown"),
+           GetEnvStringOrDefault("SPMM_TILE_CONFIG", "default"),
+           M,
+           K,
+           N,
+           split_k);
+}
+
 void PrintPerformance(const char* KernelName, float milliseconds, float tflops, double error)
 {
-    printf("%-10s \t -> \t\t Time/ms: %5.3f \t Performance/TFLOPs: %4.2f \t ErrorRate: %.2lf\n",
+    printf("%-10s \t -> \t\t Time/ms: %5.5f \t Performance/TFLOPs: %4.2f \t ErrorRate: %.2f\n",
            KernelName,
            milliseconds,
            tflops,

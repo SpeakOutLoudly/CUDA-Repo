@@ -1,45 +1,92 @@
 #!/bin/bash
+set -euo pipefail
 
-# 矩阵维度
-# M=(8192 4096 32000 32000 28672 5120 5120 3584 4096 13824 8192 18944 14336 4096 8192 11008 32000 20480 3584 21504 7168 28672 7168 27648 9216 36864 9216 36864 12288 49152 12288)
-# K=(29568 4096 5120 8192 8192 5120 13824 20480 11008 5120 8192 3584 4096 14336 28672 4096 4096 3584 18944 7168 7168 7168 28672 9216 9216 9216 36864 12288 12288 12288 49152)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
-# Split_K
-# SPLIT_K=(7 7 3 3 4 5 5 7 7 3 7 7 7 7 7 7 3 6 7 1 3 4 3 7 5 2 5 2 6 3 6)
+usage() {
+    echo "Usage:"
+    echo "  ./kernelTest.sh [kernel|bench]"
+    echo "  ./kernelTest.sh [kernel|bench] M K N SPLIT_K"
+    echo "Environment overrides:"
+    echo "  PROGRAM_MODE=kernel|bench"
+    echo "  M_CASES=4096,8192"
+    echo "  K_CASES=4096,4096"
+    echo "  N_CASES=128,64"
+    echo "  SPLIT_K_CASES=4,1"
+    echo "  BREAK_NUM=0"
+}
 
-# 输出矩阵列数
-# N=(8 16 32)
+PROGRAM_MODE="${PROGRAM_MODE:-kernel}"
+if [[ $# -eq 1 && ( "$1" == "kernel" || "$1" == "bench" ) ]]; then
+    PROGRAM_MODE="$1"
+    shift
+elif [[ $# -eq 5 && ( "$1" == "kernel" || "$1" == "bench" ) ]]; then
+    PROGRAM_MODE="$1"
+    shift
+fi
 
+declare -a M
+declare -a K
+declare -a N
+declare -a SPLIT_K
 
-
-# 正确性 debug 测试
-M=(4096)
-K=(4096)
-N=(128)
-SPLIT_K=(4)
-
-# 可选参数：提前退出的索引
-breakNum=-1  # 默认 -1 表示不提前退出
-
-# 检查 M 和 K 数组长度是否一致
-if [ ${#M[@]} -ne ${#K[@]} ]; then
-    echo "Error: M and K arrays must have the same length."
+if [[ $# -eq 4 ]]; then
+    M=("$1")
+    K=("$2")
+    N=("$3")
+    SPLIT_K=("$4")
+elif [[ $# -eq 0 ]]; then
+    IFS=',' read -r -a M <<< "${M_CASES:-4096}"
+    IFS=',' read -r -a K <<< "${K_CASES:-4096}"
+    IFS=',' read -r -a N <<< "${N_CASES:-128}"
+    IFS=',' read -r -a SPLIT_K <<< "${SPLIT_K_CASES:-4}"
+else
+    usage
     exit 1
 fi
 
-# 循环运行测试
+BREAK_NUM="${BREAK_NUM:--1}"
+CUDA_VISIBLE_DEVICE="${CUDA_VISIBLE_DEVICE:-${CUDA_VISIBLE_DEVICES:-0}}"
+SPMM_PRINT_CONFIG="${SPMM_PRINT_CONFIG:-1}"
+SPMM_PREVIEW_COUNT="${SPMM_PREVIEW_COUNT:-16}"
+
+case "$PROGRAM_MODE" in
+    kernel)
+        PROGRAM_PATH="${PROGRAM_PATH:-$SCRIPT_DIR/kernelTest}"
+        ;;
+    bench)
+        PROGRAM_PATH="${PROGRAM_PATH:-$PROJECT_ROOT/bench/benchMain}"
+        ;;
+    *)
+        echo "Unsupported PROGRAM_MODE: $PROGRAM_MODE"
+        exit 1
+        ;;
+esac
+
+if [[ ${#M[@]} -ne ${#K[@]} || ${#M[@]} -ne ${#SPLIT_K[@]} ]]; then
+    echo "Error: M_CASES, K_CASES, and SPLIT_K_CASES must have the same length."
+    exit 1
+fi
+
+echo "[TrialRun] role=correctness program_mode=$PROGRAM_MODE program_path=$PROGRAM_PATH device=$CUDA_VISIBLE_DEVICE cases=${#M[@]} n_values=${#N[@]}"
+
 for ((i=0; i<${#M[@]}; i++)); do
     m=${M[i]}
     k=${K[i]}
     splitk=${SPLIT_K[i]}
     for n in "${N[@]}"; do
-        echo "Running spinfer and cublas test case: M=$m, K=$k, N=$n, SPLIT_K=$splitk"
-        CUDA_VISIBLE_DEVICES=0 ./kernelTest $m $k $n $splitk
+        echo "[TrialRun] launching M=$m K=$k N=$n SPLIT_K=$splitk"
+        env \
+            CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICE" \
+            SPMM_RUN_ROLE=correctness \
+            SPMM_PRINT_CONFIG="$SPMM_PRINT_CONFIG" \
+            SPMM_PREVIEW_COUNT="$SPMM_PREVIEW_COUNT" \
+            "$PROGRAM_PATH" "$m" "$k" "$n" "$splitk"
     done
 
-    # 提前退出判断
-    if [ "$breakNum" -ge 0 ] && [ "$i" -eq "$breakNum" ]; then
-        echo "Reached breakNum=$breakNum, exiting loop."
+    if [[ "$BREAK_NUM" -ge 0 && "$i" -eq "$BREAK_NUM" ]]; then
+        echo "Reached BREAK_NUM=$BREAK_NUM, exiting loop."
         break
     fi
 done

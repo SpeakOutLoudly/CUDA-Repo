@@ -17,7 +17,7 @@
 // Each thread deals with 8 output elements, each elements is the sum of Split_K elements
 // Each Warp: 32 threads_per_warp * 8 half_per_threads -> 256 half_per_warp
 // Each GPU: 108 SM -> 108 warp -> 108*256 = 27648
-// GridSize = (M_Global*N_Global) / 256
+// GridSize = ceil((M_Global * N_Global) / 256)
 
 #include "TileConfig.h"
 #include <cuda_fp16.h>
@@ -26,28 +26,31 @@
 
 __global__ void SplitK_Reduction(half* C, half* Reduction_Workspace, int M_Global, int N_Global, int Split_K)
 {
-    // return;
-    half* C_BasePTR_ThisBlock = C + ELEMENT_PER_THREADBLOCK * blockIdx.x;  // 当前线程块负责处理的最终结果的起始地址
-    half* R_BasePTR_ThisBlock = Reduction_Workspace + ELEMENT_PER_THREADBLOCK * blockIdx.x;  // 当前线程块处理的规约数据起始地址
-    
-    // 用于存储规约结果，使用 float 类型进行累加
-    float Results[HALF_PER_128bit];
+    const int base_idx = (blockIdx.x * blockDim.x + threadIdx.x) * HALF_PER_128bit;
+    const int total_elements = M_Global * N_Global;
+    if (base_idx >= total_elements)
+        return;
 
+    half* c_ptr = C + base_idx;
+    half* r_ptr = Reduction_Workspace + base_idx;
+
+    float2 results[HALF_PER_128bit / 2];
 #pragma unroll
-    // 初始化结果寄存器为 0 
-    for (int j = 0; j < HALF_PER_128bit; j++)
-        Results[j] = 0.0f;
-    
-    // 按照 split_K 维度进行累加规约
+    for (int j = 0; j < HALF_PER_128bit / 2; j++)
+        results[j] = make_float2(0.0f, 0.0f);
+
     for (int i = 0; i < Split_K; i++) {
+        const half2* src = reinterpret_cast<const half2*>(r_ptr + i * total_elements);
 #pragma unroll
-        for (int j = 0; j < HALF_PER_128bit; j++)
-            Results[j] += __half2float(R_BasePTR_ThisBlock[threadIdx.x * HALF_PER_128bit + j]);
-        R_BasePTR_ThisBlock += M_Global * N_Global;
+        for (int j = 0; j < HALF_PER_128bit / 2; j++) {
+            float2 value = __half22float2(src[j]);
+            results[j].x += value.x;
+            results[j].y += value.y;
+        }
     }
 
-    // 存储最终结果
+    half2* dst = reinterpret_cast<half2*>(c_ptr);
 #pragma unroll
-    for (int j = 0; j < HALF_PER_128bit; j++)
-        C_BasePTR_ThisBlock[threadIdx.x * HALF_PER_128bit + j] = __float2half_rn(Results[j]);
+    for (int j = 0; j < HALF_PER_128bit / 2; j++)
+        dst[j] = __floats2half2_rn(results[j].x, results[j].y);
 }

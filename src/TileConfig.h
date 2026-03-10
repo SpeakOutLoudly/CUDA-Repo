@@ -104,3 +104,8 @@ struct SpKLoopConfig {
 // template<int _BLOCK_ROW_WARPS, int _BLOCK_COL_WARPS, int _WARP_COL_TENSORS, int _BLOCK_K_STEPS = 2>
 // using N2M4TilingConfigK32 =
 //     N2M4TilingConfig<32, _BLOCK_ROW_WARPS, _BLOCK_COL_WARPS, _WARP_COL_TENSORS, _BLOCK_K_STEPS>;
+
+// 常用候选配置，便于 profiling 脚本和 launch policy 统一引用。
+using N2M4ConfigN64Default = N2M4TilingConfig<16, 2, 2, 4, 2, 4>;
+using N2M4ConfigN128Compact = N2M4TilingConfig<16, 2, 2, 4, 4, 4>;
+using N2M4ConfigN128Wide = N2M4TilingConfig<16, 4, 2, 8, 2, 4>;
