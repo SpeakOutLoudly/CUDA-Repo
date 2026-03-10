@@ -48,3 +48,10 @@
 - Change: switch the `N=512` dispatch in `src/SpMM_API.cu` from `SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 3>`.
 - Rationale: both direct-output store experiments are now dead ends, so the next safe step is to stop touching the output path and return to launch-policy search on the recovered 3-stage kernel. This keeps the same `128x128x64` tile and the same 3-stage `cp.async` depth that previously helped, but swaps the warp decomposition from `2x4` back to `4x2`. That changes only which side of the tile each warp carries more fragments for, and it automatically bypasses the direct-store specialization because that specialization only matches `N2M4ConfigN128Balanced`.
 - Status: pending cloud validation.
+
+## 2026-03-10 21:10 CST
+
+- Commit: `b4ffbf6`
+- Change: switch the `N=1024` dispatch in `src/SpMM_API.cu` from `SpMM_N2M4_Kernel_API<N2M4TilingConfig<16, 4, 8, 16, 2, 4>, 2>` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 3>`.
+- Rationale: the old `N=1024` launch is not just slow, it is invalid. Its `TILE_N=1024 / BLOCK_THREADS=1024` shape requests `280576B` of dynamic shared memory, which exceeds the sm86/A40 opt-in limit of `101376B`, so the main kernel never launches and the near-zero `n2m4` runtime is bogus. The first valid recovery step is to reuse the already-proven `128x128x64 / 256-thread / stage3` tile so `N=1024` is split across 8 blocks in N while staying under the shared-memory limit.
+- Status: pending cloud validation.
