@@ -33,4 +33,11 @@
 - Commit: `addb772`
 - Change: switch the `N=512` dispatch in `src/SpMM_API.cu` from `SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Compact, 2>`.
 - Rationale: after the direct-store regression, the best known valid baseline is still the shared-store `N2M4ConfigN128Balanced, 3` kernel. Its latest valid NCU (`bench/ncu/benchMain_20260310_185126.csv`) is limited by `wait=2.035946`, `math_pipe_throttle=1.944977`, `barrier=1.636837`, and `shared_mem_per_block=77.824 KB`, which locks it to one resident block per SM. The `128x64x64 / 128-thread / stage2` launch cuts dynamic shared memory to `34816B`, enabling two resident blocks per SM on sm86/A40 while keeping B/global-store traffic per output tile unchanged; the tradeoff is only extra A/metadata traffic along N, which is the cheaper side of the reuse loss.
+- Result: regressed badly on the cloud path. `bench/ncu/benchMain_20260310_195636.csv` shows the active `SpMM_N2M4_Kernel` runtime rising to `0.209504 ms`, with `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` jumping from `6553600` to `8912896` and `smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio` rising from `0.705609` to `4.257484`. The extra residency did not compensate for the lost B/A reuse.
+
+## 2026-03-10 20:15 CST
+
+- Commit: `dcd5d90`
+- Change: restore the `N=512` dispatch in `src/SpMM_API.cu` to `SpMM_N2M4_Kernel_API<N2M4ConfigN128Balanced, 3>`, and replace the previous naive direct-output store with a coalesced warp-shuffle implementation for the active `N2M4ConfigN128Balanced` path in `src/LoadAndStore.cuh`.
+- Rationale: the direct-store idea was only wrong because its write pattern doubled global-store sectors, not because bypassing shared memory was inherently bad. The best valid launch is still `N2M4ConfigN128Balanced, 3`, so the next single-variable step is to keep that launch fixed and retest only the output path with the same 128-bit row-wise store shape used by `StoreToGlobalMemoryFromShared`, but assembled directly from registers via warp shuffles. If this works, it should keep `l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum` near `131072` while eliminating the final shared-memory writeback and block-wide output barrier.
 - Status: pending cloud validation.
