@@ -173,7 +173,7 @@ cudaError_t SpMM_N2M4_Launch(   cudaStream_t stream,
             // <16,2,2,4,4,4> -> TILE_M=128, TILE_N=64, TILE_K=64, BLOCK_THREADS=128
             // Favor N-direction parallelism for large-N cases to reduce per-warp
             // accumulator pressure while keeping a 256-thread block.
-            SpMM_N2M4_Kernel_API<N2M4ConfigN512WideN, 2>(
+            SpMM_N2M4_Kernel_API<N2M4ConfigN128Wide, 2>(
                 stream, Compressed_A, B, metadata, KernelOutputPtr, M_Global, N_Global, K_Global, Split_K);
             break;  
         case 1024:
