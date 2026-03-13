@@ -196,6 +196,7 @@ cudaError_t LaunchGenericSparseKernel(cudaStream_t stream,
     }
 
     switch (N_Global) {
+#if AGENT_ENABLE_SPARSE_K16_PATHS
         case 8:
             return LaunchConfiguredKernel<N2M4TilingConfig<16, 4, 1, 1, 1, 4>, 2>(
                 stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
@@ -217,6 +218,7 @@ cudaError_t LaunchGenericSparseKernel(cudaStream_t stream,
         case 512:
             return LaunchConfiguredKernel<N2M4ConfigN128Wide, 3>(
                 stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
+#endif
         case 1024:
             return LaunchConfiguredKernel<N2M4TilingConfig<32, 2, 2, 4, 2, 2>, 2>(
                 stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);

@@ -30,7 +30,7 @@ struct CuSparseLtSpmmContext {
     void* dCompressBuffer = nullptr;
 };
 
-static constexpr cusparseComputeType AGENT_CUSPARSELT_COMPUTE_TYPE = CUSPARSE_COMPUTE_16F;
+static constexpr cusparseComputeType AGENT_CUSPARSELT_COMPUTE_TYPE = CUSPARSE_COMPUTE_32F;
 
 inline cudaError_t ReportCuSparseLtError(const char* expr, cusparseStatus_t status, int line) {
     std::printf("cuSPARSELt error at line %d for %s: status=%d\n", line, expr, static_cast<int>(status));

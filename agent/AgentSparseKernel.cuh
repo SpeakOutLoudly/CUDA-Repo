@@ -10,6 +10,12 @@ constexpr int REG_PER_C_TENSOR_16_8 = 4;
 constexpr int WARP_SIZE = 32;
 constexpr int HALF_PER_128bit = 8;
 
+// CUDA 12.2 ptxas rejects the current K16 sparse MMA inline PTX syntax in this file.
+// Keep the K32 path enabled so the agent build can still target shapes such as N=1024.
+#ifndef AGENT_ENABLE_SPARSE_K16_PATHS
+#define AGENT_ENABLE_SPARSE_K16_PATHS 0
+#endif
+
 template <int _K,
           int _BLOCK_ROW_WARPS,
           int _BLOCK_COL_WARPS,
@@ -268,6 +274,7 @@ __device__ __forceinline__ void AgentLoadMetadata(uint32_t regs[][Config::METADA
     }
 }
 
+#if AGENT_ENABLE_SPARSE_K16_PATHS
 __device__ __forceinline__ void AgentSparseMmaK16_0(uint32_t c[],
                                                     const uint32_t a[],
                                                     const uint32_t b[],
@@ -308,9 +315,10 @@ __device__ __forceinline__ void AgentSparseMmaK16_3(uint32_t c[],
     asm volatile(
         "mma.sp::ordered_metadata.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%0, %1, %2, %3}, %8, 0x3;\n"
-         : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-         : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]), "r"(metadata));
+        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]), "r"(metadata));
 }
+#endif
 
 __device__ __forceinline__ void AgentSparseMmaK32_0(uint32_t c[],
                                                     const uint32_t a[],
@@ -341,6 +349,7 @@ __device__ __forceinline__ void AgentSparseMmaK32_1(uint32_t c[],
 template <int SparseK>
 struct AgentTensorCoreLoopImpl;
 
+#if AGENT_ENABLE_SPARSE_K16_PATHS
 template <>
 struct AgentTensorCoreLoopImpl<16> {
     template <typename Config>
@@ -390,6 +399,7 @@ struct AgentTensorCoreLoopImpl<16> {
         }
     }
 };
+#endif
 
 template <>
 struct AgentTensorCoreLoopImpl<32> {
