@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 
 #include "AgentSparseKernel.cuh"
@@ -116,9 +117,10 @@ cudaError_t LaunchSparseKernel(cudaStream_t stream,
                           static_cast<int>(sizeof(half)) * stages +
                       ((N2M4TilingConfig::TILE_M * N2M4TilingConfig::TILE_K / 2)) / 4 * stages;
 
-    const int resultSize =
-        (N2M4TilingConfig::TILE_M * (N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C)) *
-        static_cast<int>(sizeof(half));
+    const int resultSize = AgentOutputStorePolicy<N2M4TilingConfig>::kUseDirectStore
+                               ? 0
+                               : (N2M4TilingConfig::TILE_M * (N2M4TilingConfig::TILE_N + PADDING_SHARED_MEM_FOR_C)) *
+                                     static_cast<int>(sizeof(half));
     if (stages > 1) {
         computeSize -= ((N2M4TilingConfig::TILE_M * N2M4TilingConfig::TILE_K / 2)) / 4;
     }
@@ -182,6 +184,45 @@ cudaError_t LaunchConfiguredKernel(cudaStream_t stream,
         stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
 }
 
+cudaError_t LaunchN1024Variant(cudaStream_t stream,
+                               const half* Compressed_A,
+                               const half* B,
+                               const uint16_t* metadata,
+                               half* C,
+                               int M_Global,
+                               int N_Global,
+                               int K_Global,
+                               int Split_K) {
+    const char* variant = GetEnvStringOrDefault("SPMM_N1024_VARIANT", "k32_64x64_s2");
+
+    if (std::strcmp(variant, "k32_64x64_s2") == 0) {
+        return LaunchConfiguredKernel<N2M4TilingConfig<32, 2, 2, 4, 2, 2>, 2>(
+            stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
+    }
+    if (std::strcmp(variant, "k32_64x64_s3") == 0) {
+        return LaunchConfiguredKernel<N2M4TilingConfig<32, 2, 2, 4, 2, 2>, 3>(
+            stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
+    }
+    if (std::strcmp(variant, "k32_64x64_nwide_s2") == 0) {
+        return LaunchConfiguredKernel<N2M4TilingConfig<32, 2, 1, 8, 2, 2>, 2>(
+            stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
+    }
+    if (std::strcmp(variant, "k32_64x64_mwide_s2") == 0) {
+        return LaunchConfiguredKernel<N2M4TilingConfig<32, 1, 2, 4, 4, 2>, 2>(
+            stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
+    }
+    if (std::strcmp(variant, "k32_128x64_s2") == 0) {
+        return LaunchConfiguredKernel<N2M4TilingConfig<32, 2, 2, 4, 4, 2>, 2>(
+            stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
+    }
+    if (std::strcmp(variant, "k32_64x128_s2") == 0) {
+        return LaunchConfiguredKernel<N2M4TilingConfig<32, 2, 2, 8, 2, 2>, 2>(
+            stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
+    }
+    std::printf("[SpMM] unknown SPMM_N1024_VARIANT=%s\n", variant);
+    return cudaErrorInvalidValue;
+}
+
 cudaError_t LaunchGenericSparseKernel(cudaStream_t stream,
                                       const half* Compressed_A,
                                       const half* B,
@@ -220,7 +261,7 @@ cudaError_t LaunchGenericSparseKernel(cudaStream_t stream,
                 stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
 #endif
         case 1024:
-            return LaunchConfiguredKernel<N2M4TilingConfig<32, 2, 2, 4, 2, 2>, 2>(
+            return LaunchN1024Variant(
                 stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
         default:
             return cudaErrorInvalidValue;

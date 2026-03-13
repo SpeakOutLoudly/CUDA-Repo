@@ -556,6 +556,22 @@ __device__ __forceinline__ void AgentStoreSharedToGlobal(
     AgentSharedStore<Config::MMA_N_SP * Config::WARP_COL_TENSORS>::template run<Config>(shared_c, global_ptr, global_n);
 }
 
+template <typename Config>
+struct AgentOutputStorePolicy {
+    static constexpr bool kUseDirectStore = false;
+
+    __device__ __forceinline__ static void run(
+        half* shared_mem,
+        half* global_ptr,
+        int global_n,
+        float accum[][REG_PER_C_TENSOR_16_8]) {
+        __syncthreads();
+        auto shared_c = reinterpret_cast<half(*)[Config::TILE_N + PADDING_SHARED_MEM_FOR_C]>(shared_mem);
+        AgentStoreAccumulatorToShared<Config>(shared_c, accum);
+        AgentStoreSharedToGlobal<Config>(shared_c, global_ptr, global_n);
+    }
+};
+
 template <typename Config, int stages>
 __global__ void SpMM_N2M4_Kernel(const half* compressed_a,
                                  const uint16_t* metadata,
@@ -680,11 +696,8 @@ __global__ void SpMM_N2M4_Kernel(const half* compressed_a,
         }
     }
 
-    __syncthreads();
-    auto shared_c = reinterpret_cast<half(*)[Config::TILE_N + PADDING_SHARED_MEM_FOR_C]>(shared_mem);
-    AgentStoreAccumulatorToShared<Config>(shared_c, accum);
     half* global_c = c + split_k_idx * (M_Global * N_Global) + tile_row * N_Global + tile_col;
-    AgentStoreSharedToGlobal<Config>(shared_c, global_c, N_Global);
+    AgentOutputStorePolicy<Config>::run(shared_mem, global_c, N_Global, accum);
 }
 
 __global__ void SplitK_Reduction(half* C, half* reduction_workspace, int M_Global, int N_Global, int Split_K) {
