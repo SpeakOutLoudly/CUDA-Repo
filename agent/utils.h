@@ -90,6 +90,121 @@ inline void init_host_matrices(half* matrix, int rows, int cols) {
     }
 }
 
+inline int toolCompressMatrixA(half* denseMatrixA,
+                               int Global_M,
+                               int Global_K,
+                               int Block_M,
+                               int Block_K,
+                               half** compressedMatrixA,
+                               uint16_t** metadata) {
+    const int blockRowNums = Global_M / Block_M;
+    const int blockColNums = Global_K / Block_K;
+
+    *compressedMatrixA = static_cast<half*>(std::malloc(sizeof(half) * static_cast<size_t>(Global_M) * Global_K / 2));
+    *metadata =
+        static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * static_cast<size_t>(blockRowNums) * blockColNums * 16));
+
+    if (*compressedMatrixA == nullptr || *metadata == nullptr) {
+        std::printf("Failed to allocate sparse A buffers.\n");
+        return -1;
+    }
+
+    int valCount = 0;
+    int metadataCount = 0;
+    for (int blockRow = 0; blockRow < blockRowNums; ++blockRow) {
+        for (int blockCol = 0; blockCol < blockColNums; ++blockCol) {
+            for (int row = 0; row < Block_M; ++row) {
+                uint16_t rowMetadata = 0;
+                int packedOffset = 0;
+                for (int colBase = 0; colBase < Block_K; colBase += 4) {
+                    int zeroCount = 0;
+                    for (int offset = 0; offset < 4; ++offset) {
+                        const int col = colBase + offset;
+                        const int realRow = blockRow * Block_M + row;
+                        const int realCol = blockCol * Block_K + col;
+                        const half value = denseMatrixA[realRow * Global_K + realCol];
+
+                        if (zeroCount < 2 && __half2float(value) == 0.0f) {
+                            ++zeroCount;
+                            continue;
+                        }
+
+                        (*compressedMatrixA)[valCount++] = value;
+                        rowMetadata |= static_cast<uint16_t>(offset << (2 * packedOffset));
+                        ++packedOffset;
+                    }
+                }
+                (*metadata)[metadataCount++] = rowMetadata;
+            }
+        }
+    }
+
+    return valCount;
+}
+
+inline void toolReorderMetadata(uint16_t* metadata,
+                                int Global_M,
+                                int Global_K,
+                                int Block_M,
+                                int Block_K,
+                                uint16_t** reorderMetadata) {
+    const int blockRowNums = Global_M / Block_M;
+    const int blockColNums = Global_K / Block_K;
+
+    *reorderMetadata =
+        static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * static_cast<size_t>(blockRowNums) * blockColNums * 16));
+    if (*reorderMetadata == nullptr) {
+        std::printf("Failed to allocate reordered metadata buffer.\n");
+        return;
+    }
+
+    for (int blockRow = 0; blockRow < blockRowNums; ++blockRow) {
+        for (int blockCol = 0; blockCol < blockColNums; blockCol += 4) {
+            const int idx = (blockRow * blockColNums + blockCol) * 16;
+            for (int i = 0; i < 8; ++i) {
+                for (int j = 0; j < 8; ++j) {
+                    const int offset = (j % 2) * 8 + (j / 2) * 16 + i;
+                    (*reorderMetadata)[idx + i * 8 + j] = metadata[idx + offset];
+                }
+            }
+        }
+    }
+}
+
+inline void toolPackMatrixB(half* MatrixB,
+                            int Global_K,
+                            int Global_N,
+                            int Block_K,
+                            int Block_N,
+                            half** packMatrixB) {
+    const int blockRowNums = Global_K / Block_K;
+    const int blockColNums = Global_N / Block_N;
+
+    *packMatrixB = static_cast<half*>(std::malloc(sizeof(half) * static_cast<size_t>(Global_K) * Global_N));
+    if (*packMatrixB == nullptr) {
+        std::printf("Failed to allocate packed B buffer.\n");
+        return;
+    }
+
+    half* dst = *packMatrixB;
+    for (int bc = 0; bc < blockColNums; ++bc) {
+        for (int br = 0; br < blockRowNums; ++br) {
+            const size_t blockId = static_cast<size_t>(bc) * blockRowNums + br;
+            const size_t baseDst = blockId * static_cast<size_t>(Block_K) * Block_N;
+            const int baseRow = br * Block_K;
+            const int baseCol = bc * Block_N;
+
+            for (int r = 0; r < Block_K; ++r) {
+                const half* srcRowPtr = MatrixB + static_cast<size_t>(baseRow + r) * Global_N + baseCol;
+                half* dstRowPtr = dst + baseDst + static_cast<size_t>(r) * Block_N;
+                for (int c = 0; c < Block_N; ++c) {
+                    dstRowPtr[c] = srcRowPtr[c];
+                }
+            }
+        }
+    }
+}
+
 struct AgentInputAnalysis {
     bool dense_b_all_ones = false;
     float min_row_sum = 0.0f;

@@ -106,27 +106,42 @@ int RunKernelTest(int M_GLOBAL, int K_GLOBAL, int N_GLOBAL, int SPLIT_K) {
         static_cast<float>((static_cast<double>(M_GLOBAL) * N_GLOBAL * K_GLOBAL * 2.0) /
                            (milliseconds_cublas / 1000.0) / 1.0e12);
 
-    std::printf("Preparing agent fast-path buffers...\n");
+    std::printf("Preparing agent sparse buffers...\n");
     half* compressedMatrixA_host = nullptr;
-    const size_t compressed_a_bytes =
-        PrepareCompressedRowSums(A_host, M_GLOBAL, K_GLOBAL, &compressedMatrixA_host);
-    if (compressed_a_bytes == 0) {
-        std::printf("Failed to prepare compressed A.\n");
+    uint16_t* metadata_raw_host = nullptr;
+    const int compressed_values =
+        toolCompressMatrixA(A_host, M_GLOBAL, K_GLOBAL, 16, 16, &compressedMatrixA_host, &metadata_raw_host);
+    if (compressed_values < 0) {
+        std::printf("Failed to compress sparse A.\n");
+        return -1;
+    }
+
+    uint16_t* metadata_host = nullptr;
+    toolReorderMetadata(metadata_raw_host, M_GLOBAL, K_GLOBAL, 16, 16, &metadata_host);
+    if (metadata_host == nullptr) {
+        std::printf("Failed to reorder metadata.\n");
         return -1;
     }
 
     half* packedMatrixB_host = nullptr;
-    const size_t packed_b_bytes = PreparePackedBSignature(analysis.dense_b_all_ones, &packedMatrixB_host);
-    if (packed_b_bytes == 0) {
-        std::printf("Failed to prepare packed B signature.\n");
+    toolPackMatrixB(B_rowMajor_host, K_GLOBAL, N_GLOBAL, 64, 8, &packedMatrixB_host);
+    if (packedMatrixB_host == nullptr) {
+        std::printf("Failed to pack dense B.\n");
         return -1;
     }
 
+    const size_t compressed_a_bytes = sizeof(half) * static_cast<size_t>(M_GLOBAL) * K_GLOBAL / 2;
+    const size_t metadata_bytes = sizeof(uint16_t) * static_cast<size_t>(M_GLOBAL) * K_GLOBAL / 16;
+    const size_t packed_b_bytes = sizeof(half) * static_cast<size_t>(K_GLOBAL) * N_GLOBAL;
+
     half* compressedMatrixA_device = nullptr;
+    uint16_t* metadata_device = nullptr;
     half* packedMatrixB_device = nullptr;
     cudaMalloc(reinterpret_cast<void**>(&compressedMatrixA_device), compressed_a_bytes);
+    cudaMalloc(reinterpret_cast<void**>(&metadata_device), metadata_bytes);
     cudaMalloc(reinterpret_cast<void**>(&packedMatrixB_device), packed_b_bytes);
     cudaMemcpy(compressedMatrixA_device, compressedMatrixA_host, compressed_a_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(metadata_device, metadata_host, metadata_bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(packedMatrixB_device, packedMatrixB_host, packed_b_bytes, cudaMemcpyHostToDevice);
     checkLastCudaError(__LINE__);
 
@@ -139,19 +154,25 @@ int RunKernelTest(int M_GLOBAL, int K_GLOBAL, int N_GLOBAL, int SPLIT_K) {
 
     std::printf("Running agent kernel...\n");
     half* result_device = nullptr;
+    half* splitK_device = nullptr;
     cudaMalloc(reinterpret_cast<void**>(&result_device), sizeof(half) * static_cast<size_t>(M_GLOBAL) * N_GLOBAL);
     cudaMemset(result_device, 0, sizeof(half) * static_cast<size_t>(M_GLOBAL) * N_GLOBAL);
+    if (SPLIT_K > 1) {
+        cudaMalloc(reinterpret_cast<void**>(&splitK_device),
+                   sizeof(half) * static_cast<size_t>(M_GLOBAL) * N_GLOBAL * SPLIT_K);
+        cudaMemset(splitK_device, 0, sizeof(half) * static_cast<size_t>(M_GLOBAL) * N_GLOBAL * SPLIT_K);
+    }
 
     for (int i = 0; i < WARM_UP_ITERATION; ++i) {
         error = SpMM_N2M4_Launch(0,
                                  compressedMatrixA_device,
                                  packedMatrixB_device,
-                                 nullptr,
+                                 metadata_device,
                                  result_device,
                                  M_GLOBAL,
                                  N_GLOBAL,
                                  K_GLOBAL,
-                                 nullptr,
+                                 splitK_device,
                                  SPLIT_K);
         if (error != cudaSuccess) {
             std::printf("Warmup launch failed: %s\n", cudaGetErrorString(error));
@@ -168,12 +189,12 @@ int RunKernelTest(int M_GLOBAL, int K_GLOBAL, int N_GLOBAL, int SPLIT_K) {
         error = SpMM_N2M4_Launch(0,
                                  compressedMatrixA_device,
                                  packedMatrixB_device,
-                                 nullptr,
+                                 metadata_device,
                                  result_device,
                                  M_GLOBAL,
                                  N_GLOBAL,
                                  K_GLOBAL,
-                                 nullptr,
+                                 splitK_device,
                                  SPLIT_K);
         if (error != cudaSuccess) {
             std::printf("Benchmark launch failed: %s\n", cudaGetErrorString(error));
@@ -207,7 +228,9 @@ int RunKernelTest(int M_GLOBAL, int K_GLOBAL, int N_GLOBAL, int SPLIT_K) {
     std::free(result_host);
     std::free(cublasResult_host);
     std::free(cusparseLtResult_host);
-    std::free(reinterpret_cast<void*>(compressedMatrixA_host));
+    std::free(compressedMatrixA_host);
+    std::free(metadata_raw_host);
+    std::free(metadata_host);
     std::free(packedMatrixB_host);
     std::free(A_host);
     std::free(B_host);
@@ -219,7 +242,9 @@ int RunKernelTest(int M_GLOBAL, int K_GLOBAL, int N_GLOBAL, int SPLIT_K) {
     cudaFree(cublasResult_device);
     cudaFree(cusparseLtResult_device);
     cudaFree(compressedMatrixA_device);
+    cudaFree(metadata_device);
     cudaFree(packedMatrixB_device);
+    cudaFree(splitK_device);
     cudaFree(A_device);
     cudaFree(B_device);
     cudaFree(B_rowMajor_device);

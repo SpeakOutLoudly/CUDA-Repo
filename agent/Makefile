@@ -43,7 +43,7 @@ OBJ_DIR ?= ./obj
 
 TARGET := $(BIN_DIR)/kernelTest
 OBJECTS := $(OBJ_DIR)/kernelTest.o $(OBJ_DIR)/benchmark_runner.o $(OBJ_DIR)/SpMM_API.o
-HEAD_FILES := kernelTest.cu benchmark_runner.cu benchmark_runner.h SpMM_API.cu SpMM_API.h utils.h backends/cuSparseLt_backend.cuh
+HEAD_FILES := kernelTest.cu benchmark_runner.cu benchmark_runner.h SpMM_API.cu SpMM_API.h AgentSparseKernel.cuh utils.h backends/cuSparseLt_backend.cuh
 
 .PHONY: all clean
 
@@ -58,7 +58,7 @@ $(OBJ_DIR)/kernelTest.o: kernelTest.cu benchmark_runner.h | $(OBJ_DIR)
 $(OBJ_DIR)/benchmark_runner.o: benchmark_runner.cu $(HEAD_FILES) | $(OBJ_DIR)
 	$(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
-$(OBJ_DIR)/SpMM_API.o: SpMM_API.cu SpMM_API.h utils.h backends/cuSparseLt_backend.cuh | $(OBJ_DIR)
+$(OBJ_DIR)/SpMM_API.o: SpMM_API.cu SpMM_API.h AgentSparseKernel.cuh utils.h backends/cuSparseLt_backend.cuh | $(OBJ_DIR)
 	$(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 $(TARGET): $(OBJECTS) | $(BIN_DIR)
