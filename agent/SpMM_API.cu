@@ -218,7 +218,7 @@ cudaError_t LaunchGenericSparseKernel(cudaStream_t stream,
             return LaunchConfiguredKernel<N2M4ConfigN128Wide, 3>(
                 stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
         case 1024:
-            return LaunchConfiguredKernel<N2M4TilingConfig<16, 2, 2, 4, 2, 4>, 2>(
+            return LaunchConfiguredKernel<N2M4TilingConfig<32, 2, 2, 4, 2, 2>, 2>(
                 stream, Compressed_A, B, metadata, C, M_Global, N_Global, K_Global, Split_K);
         default:
             return cudaErrorInvalidValue;

@@ -17,7 +17,7 @@ template <int _K,
           int _WARP_ROW_TENSORS = 1,
           int _BLOCK_K_STEPS = 4>
 struct N2M4TilingConfig {
-    static_assert(_K == 16, "AgentSparseKernel currently implements the K16 sparse MMA path only");
+    static_assert(_K == 16 || _K == 32, "AgentSparseKernel supports sparse MMA K16 and K32 paths only");
 
     static constexpr int MMA_M_SP = 16;
     static constexpr int MMA_N_SP = 8;
@@ -34,6 +34,10 @@ struct N2M4TilingConfig {
     static constexpr int TILE_M = MMA_M_SP * WARP_ROW_TENSORS * BLOCK_ROW_WARPS;
     static constexpr int TILE_N = MMA_N_SP * WARP_COL_TENSORS * BLOCK_COL_WARPS;
     static constexpr int TILE_K = MMA_K_SP * BLOCK_K_STEPS;
+    static constexpr int FRAGMENT_REGS = MMA_K_SP / 8;
+    static constexpr int METADATA_GROUPS = TILE_K / 64;
+
+    static_assert((TILE_K % 64) == 0, "Sparse metadata path expects TILE_K to be a multiple of 64");
 };
 
 using N2M4ConfigN128Wide = N2M4TilingConfig<16, 4, 2, 8, 2, 4>;
@@ -134,8 +138,14 @@ __device__ __forceinline__ void AgentAsyncCopyMetadata(uint16_t* shared_mem_ptr,
     const bool valid = pred && (group_id < copy_units);
 
     const uint16_t* src = global_mem_ptr + group_id * global_stride;
-    uint16_t* dst = shared_mem_ptr + group_id * 64;
-    AgentCpAsync<16>(dst + lane_id * 8, src + lane_id * 8, valid);
+    uint16_t* dst = shared_mem_ptr + group_id * 64 * Config::METADATA_GROUPS;
+
+    #pragma unroll
+    for (int metadata_group = 0; metadata_group < Config::METADATA_GROUPS; ++metadata_group) {
+        AgentCpAsync<16>(dst + metadata_group * 64 + lane_id * 8,
+                         src + metadata_group * 64 + lane_id * 8,
+                         valid);
+    }
 }
 
 template <int NumTensors>
@@ -187,19 +197,74 @@ __device__ __forceinline__ void AgentLoadAFragmentsK16(uint32_t regs[][2],
 }
 
 template <int NumTensors>
-__device__ __forceinline__ void AgentLoadMetadata(uint32_t regs[], uint16_t* shared_mem_ptr, int warp_start_m) {
+__device__ __forceinline__ void AgentLoadBFragmentsK32(uint32_t regs[][4],
+                                                       half* shared_mem_ptr,
+                                                       int warp_start_n,
+                                                       int k_step_offset) {
     const int lane_id = threadIdx.x % WARP_SIZE;
-    shared_mem_ptr += (warp_start_m / 16) * 16 * 4;
-    shared_mem_ptr += (lane_id & 7) * 8;
+    const int col = lane_id % 8;
+    const int row = lane_id / 8 + k_step_offset * 4;
+    const int read_col = col ^ row;
+
+    shared_mem_ptr += (warp_start_n / 8) * 8 * 64;
+    shared_mem_ptr += row * 64 + read_col * 8;
     uint32_t smem_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(shared_mem_ptr));
 
     #pragma unroll
     for (int tensor = 0; tensor < NumTensors; ++tensor) {
-        asm volatile("ldmatrix.sync.aligned.x1.m8n8.shared.b16 {%0}, [%1];\n"
-                     : "=r"(regs[tensor])
+        asm volatile("ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                     : "=r"(regs[tensor][0]), "=r"(regs[tensor][1]), "=r"(regs[tensor][2]), "=r"(regs[tensor][3])
                      : "r"(smem_ptr)
                      : "memory");
-        smem_ptr += 16 * 4 * sizeof(uint16_t);
+        smem_ptr += 64 * 8 * sizeof(half);
+    }
+}
+
+template <int NumTensors>
+__device__ __forceinline__ void AgentLoadAFragmentsK32(uint32_t regs[][4],
+                                                       half* shared_mem_ptr,
+                                                       int warp_start_m,
+                                                       int k_step_offset) {
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int col = lane_id % 8;
+    const int row = lane_id / 8 + k_step_offset * 4;
+    const int read_col = col ^ row;
+
+    shared_mem_ptr += (warp_start_m / 16) * 16 * 32;
+    shared_mem_ptr += row * 64 + read_col * 8;
+    uint32_t smem_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(shared_mem_ptr));
+
+    #pragma unroll
+    for (int tensor = 0; tensor < NumTensors; ++tensor) {
+        asm volatile("ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                     : "=r"(regs[tensor][0]), "=r"(regs[tensor][1]), "=r"(regs[tensor][2]), "=r"(regs[tensor][3])
+                     : "r"(smem_ptr)
+                     : "memory");
+        smem_ptr += 16 * 32 * sizeof(half);
+    }
+}
+
+template <int NumTensors, typename Config>
+__device__ __forceinline__ void AgentLoadMetadata(uint32_t regs[][Config::METADATA_GROUPS],
+                                                  uint16_t* shared_mem_ptr,
+                                                  int warp_start_m) {
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    shared_mem_ptr += (warp_start_m / 16) * Config::TILE_K;
+    shared_mem_ptr += (lane_id & 7) * 8;
+    uint32_t tensor_smem_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(shared_mem_ptr));
+
+    #pragma unroll
+    for (int tensor = 0; tensor < NumTensors; ++tensor) {
+        uint32_t group_smem_ptr = tensor_smem_ptr;
+        #pragma unroll
+        for (int metadata_group = 0; metadata_group < Config::METADATA_GROUPS; ++metadata_group) {
+            asm volatile("ldmatrix.sync.aligned.x1.m8n8.shared.b16 {%0}, [%1];\n"
+                         : "=r"(regs[tensor][metadata_group])
+                         : "r"(group_smem_ptr)
+                         : "memory");
+            group_smem_ptr += 64 * sizeof(uint16_t);
+        }
+        tensor_smem_ptr += Config::TILE_K * sizeof(uint16_t);
     }
 }
 
@@ -208,7 +273,7 @@ __device__ __forceinline__ void AgentSparseMmaK16_0(uint32_t c[],
                                                     const uint32_t b[],
                                                     uint32_t metadata) {
     asm volatile(
-        "mma.sp.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "mma.sp::ordered_metadata.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%0, %1, %2, %3}, %8, 0x0;\n"
         : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
         : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]), "r"(metadata));
@@ -219,7 +284,7 @@ __device__ __forceinline__ void AgentSparseMmaK16_1(uint32_t c[],
                                                     const uint32_t b[],
                                                     uint32_t metadata) {
     asm volatile(
-        "mma.sp.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "mma.sp::ordered_metadata.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%0, %1, %2, %3}, %8, 0x1;\n"
         : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
         : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]), "r"(metadata));
@@ -230,7 +295,7 @@ __device__ __forceinline__ void AgentSparseMmaK16_2(uint32_t c[],
                                                     const uint32_t b[],
                                                     uint32_t metadata) {
     asm volatile(
-        "mma.sp.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "mma.sp::ordered_metadata.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%0, %1, %2, %3}, %8, 0x2;\n"
         : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
         : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]), "r"(metadata));
@@ -241,57 +306,136 @@ __device__ __forceinline__ void AgentSparseMmaK16_3(uint32_t c[],
                                                     const uint32_t b[],
                                                     uint32_t metadata) {
     asm volatile(
-        "mma.sp.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "mma.sp::ordered_metadata.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%0, %1, %2, %3}, %8, 0x3;\n"
-        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-        : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]), "r"(metadata));
+         : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+         : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]), "r"(metadata));
 }
 
-template <typename Config>
-__device__ __forceinline__ void AgentTensorCoreLoop(
-    float accum[][REG_PER_C_TENSOR_16_8],
-    uint32_t a_regs[Config::WARP_ROW_TENSORS * 2][2],
-    uint32_t b_regs[Config::WARP_COL_TENSORS * 2][2],
-    uint32_t metadata_regs[],
-    half* shared_a,
-    half* shared_b,
-    int warp_start_row,
-    int warp_start_col) {
-    auto accum_u32 = reinterpret_cast<uint32_t(*)[REG_PER_C_TENSOR_16_8]>(accum);
+__device__ __forceinline__ void AgentSparseMmaK32_0(uint32_t c[],
+                                                    const uint32_t a[],
+                                                    const uint32_t b[],
+                                                    uint32_t metadata) {
+    asm volatile(
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10, %11}, {%0, %1, %2, %3}, %12, 0x0;\n"
+        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]),
+          "r"(metadata));
+}
 
-    AgentLoadBFragmentsK16<Config::WARP_COL_TENSORS>(b_regs, shared_b, warp_start_col, 0);
-    AgentLoadAFragmentsK16<Config::WARP_ROW_TENSORS>(a_regs, shared_a, warp_start_row, 0);
+__device__ __forceinline__ void AgentSparseMmaK32_1(uint32_t c[],
+                                                    const uint32_t a[],
+                                                    const uint32_t b[],
+                                                    uint32_t metadata) {
+    asm volatile(
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10, %11}, {%0, %1, %2, %3}, %12, 0x1;\n"
+        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]),
+          "r"(metadata));
+}
 
-    #pragma unroll
-    for (int k = 0; k < Config::BLOCK_K_STEPS; ++k) {
-        uint32_t(*b_read)[2] = b_regs + (k % 2) * Config::WARP_COL_TENSORS;
-        uint32_t(*b_write)[2] = b_regs + ((k + 1) % 2) * Config::WARP_COL_TENSORS;
-        uint32_t(*a_read)[2] = a_regs + (k % 2) * Config::WARP_ROW_TENSORS;
-        uint32_t(*a_write)[2] = a_regs + ((k + 1) % 2) * Config::WARP_ROW_TENSORS;
+template <int SparseK>
+struct AgentTensorCoreLoopImpl;
 
-        if (k + 1 < Config::BLOCK_K_STEPS) {
-            AgentLoadBFragmentsK16<Config::WARP_COL_TENSORS>(b_write, shared_b, warp_start_col, k + 1);
-            AgentLoadAFragmentsK16<Config::WARP_ROW_TENSORS>(a_write, shared_a, warp_start_row, k + 1);
-        }
+template <>
+struct AgentTensorCoreLoopImpl<16> {
+    template <typename Config>
+    __device__ __forceinline__ static void run(
+        float accum[][REG_PER_C_TENSOR_16_8],
+        uint32_t a_regs[Config::WARP_ROW_TENSORS * 2][2],
+        uint32_t b_regs[Config::WARP_COL_TENSORS * 2][2],
+        uint32_t metadata_regs[][Config::METADATA_GROUPS],
+        half* shared_a,
+        half* shared_b,
+        int warp_start_row,
+        int warp_start_col) {
+        auto accum_u32 = reinterpret_cast<uint32_t(*)[REG_PER_C_TENSOR_16_8]>(accum);
+
+        AgentLoadBFragmentsK16<Config::WARP_COL_TENSORS>(b_regs, shared_b, warp_start_col, 0);
+        AgentLoadAFragmentsK16<Config::WARP_ROW_TENSORS>(a_regs, shared_a, warp_start_row, 0);
 
         #pragma unroll
-        for (int i = 0; i < Config::WARP_ROW_TENSORS; ++i) {
+        for (int k = 0; k < Config::BLOCK_K_STEPS; ++k) {
+            uint32_t(*b_read)[2] = b_regs + (k % 2) * Config::WARP_COL_TENSORS;
+            uint32_t(*b_write)[2] = b_regs + ((k + 1) % 2) * Config::WARP_COL_TENSORS;
+            uint32_t(*a_read)[2] = a_regs + (k % 2) * Config::WARP_ROW_TENSORS;
+            uint32_t(*a_write)[2] = a_regs + ((k + 1) % 2) * Config::WARP_ROW_TENSORS;
+
+            if (k + 1 < Config::BLOCK_K_STEPS) {
+                AgentLoadBFragmentsK16<Config::WARP_COL_TENSORS>(b_write, shared_b, warp_start_col, k + 1);
+                AgentLoadAFragmentsK16<Config::WARP_ROW_TENSORS>(a_write, shared_a, warp_start_row, k + 1);
+            }
+
             #pragma unroll
-            for (int j = 0; j < Config::WARP_COL_TENSORS; ++j) {
-                uint32_t* c_frag = accum_u32[i * Config::WARP_COL_TENSORS + j];
-                if ((k & 3) == 0) {
-                    AgentSparseMmaK16_0(c_frag, a_read[i], b_read[j], metadata_regs[i]);
-                } else if ((k & 3) == 1) {
-                    AgentSparseMmaK16_1(c_frag, a_read[i], b_read[j], metadata_regs[i]);
-                } else if ((k & 3) == 2) {
-                    AgentSparseMmaK16_2(c_frag, a_read[i], b_read[j], metadata_regs[i]);
-                } else {
-                    AgentSparseMmaK16_3(c_frag, a_read[i], b_read[j], metadata_regs[i]);
+            for (int i = 0; i < Config::WARP_ROW_TENSORS; ++i) {
+                #pragma unroll
+                for (int j = 0; j < Config::WARP_COL_TENSORS; ++j) {
+                    uint32_t* c_frag = accum_u32[i * Config::WARP_COL_TENSORS + j];
+                    const uint32_t metadata = metadata_regs[i][k / 4];
+                    if ((k & 3) == 0) {
+                        AgentSparseMmaK16_0(c_frag, a_read[i], b_read[j], metadata);
+                    } else if ((k & 3) == 1) {
+                        AgentSparseMmaK16_1(c_frag, a_read[i], b_read[j], metadata);
+                    } else if ((k & 3) == 2) {
+                        AgentSparseMmaK16_2(c_frag, a_read[i], b_read[j], metadata);
+                    } else {
+                        AgentSparseMmaK16_3(c_frag, a_read[i], b_read[j], metadata);
+                    }
                 }
             }
         }
     }
-}
+};
+
+template <>
+struct AgentTensorCoreLoopImpl<32> {
+    template <typename Config>
+    __device__ __forceinline__ static void run(
+        float accum[][REG_PER_C_TENSOR_16_8],
+        uint32_t a_regs[Config::WARP_ROW_TENSORS * 2][4],
+        uint32_t b_regs[Config::WARP_COL_TENSORS * 2][4],
+        uint32_t metadata_regs[][Config::METADATA_GROUPS],
+        half* shared_a,
+        half* shared_b,
+        int warp_start_row,
+        int warp_start_col) {
+        auto accum_u32 = reinterpret_cast<uint32_t(*)[REG_PER_C_TENSOR_16_8]>(accum);
+
+        AgentLoadBFragmentsK32<Config::WARP_COL_TENSORS>(b_regs, shared_b, warp_start_col, 0);
+        AgentLoadAFragmentsK32<Config::WARP_ROW_TENSORS>(a_regs, shared_a, warp_start_row, 0);
+
+        #pragma unroll
+        for (int k = 0; k < Config::BLOCK_K_STEPS; ++k) {
+            uint32_t(*b_read)[4] = b_regs + (k % 2) * Config::WARP_COL_TENSORS;
+            uint32_t(*b_write)[4] = b_regs + ((k + 1) % 2) * Config::WARP_COL_TENSORS;
+            uint32_t(*a_read)[4] = a_regs + (k % 2) * Config::WARP_ROW_TENSORS;
+            uint32_t(*a_write)[4] = a_regs + ((k + 1) % 2) * Config::WARP_ROW_TENSORS;
+
+            if (k + 1 < Config::BLOCK_K_STEPS) {
+                AgentLoadBFragmentsK32<Config::WARP_COL_TENSORS>(b_write, shared_b, warp_start_col, k + 1);
+                AgentLoadAFragmentsK32<Config::WARP_ROW_TENSORS>(a_write, shared_a, warp_start_row, k + 1);
+            }
+
+            #pragma unroll
+            for (int i = 0; i < Config::WARP_ROW_TENSORS; ++i) {
+                #pragma unroll
+                for (int j = 0; j < Config::WARP_COL_TENSORS; ++j) {
+                    uint32_t* c_frag = accum_u32[i * Config::WARP_COL_TENSORS + j];
+                    const uint32_t metadata = metadata_regs[i][k / 2];
+                    if ((k & 1) == 0) {
+                        AgentSparseMmaK32_0(c_frag, a_read[i], b_read[j], metadata);
+                    } else {
+                        AgentSparseMmaK32_1(c_frag, a_read[i], b_read[j], metadata);
+                    }
+                }
+            }
+        }
+    }
+};
 
 template <typename Config>
 __device__ __forceinline__ void AgentStoreAccumulatorToShared(
@@ -442,9 +586,9 @@ __global__ void SpMM_N2M4_Kernel(const half* compressed_a,
     const int warp_row = warp_m * Config::WARP_ROW_TENSORS * Config::MMA_M_SP;
     const int warp_col = warp_n * Config::WARP_COL_TENSORS * Config::MMA_N_SP;
 
-    uint32_t a_regs[Config::WARP_ROW_TENSORS * 2][2];
-    uint32_t b_regs[Config::WARP_COL_TENSORS * 2][2];
-    uint32_t metadata_regs[Config::WARP_ROW_TENSORS];
+    uint32_t a_regs[Config::WARP_ROW_TENSORS * 2][Config::FRAGMENT_REGS];
+    uint32_t b_regs[Config::WARP_COL_TENSORS * 2][Config::FRAGMENT_REGS];
+    uint32_t metadata_regs[Config::WARP_ROW_TENSORS][Config::METADATA_GROUPS];
 
     const half* a_global = compressed_a + tile_row * K_Global / 2 +
                            split_k_idx * Config::MMA_M_SP * avg_k_tiles * Config::TILE_K / 2;
@@ -503,7 +647,7 @@ __global__ void SpMM_N2M4_Kernel(const half* compressed_a,
         half* write_b = shared_b + write_stage * shared_b_stage_elems;
         uint16_t* write_metadata = shared_metadata + write_metadata_stage * shared_metadata_stage_elems;
 
-        AgentLoadMetadata<Config::WARP_ROW_TENSORS>(metadata_regs, read_metadata, warp_row);
+        AgentLoadMetadata<Config::WARP_ROW_TENSORS, Config>(metadata_regs, read_metadata, warp_row);
 
         const bool issue_copy = (tile_k + stages - 1) < iterate_k;
         if (issue_copy) {
@@ -517,7 +661,8 @@ __global__ void SpMM_N2M4_Kernel(const half* compressed_a,
             metadata_global += Config::MMA_M_SP * Config::TILE_K / 16;
         }
 
-        AgentTensorCoreLoop<Config>(accum, a_regs, b_regs, metadata_regs, read_a, read_b, warp_row, warp_col);
+        AgentTensorCoreLoopImpl<Config::MMA_K_SP>::template run<Config>(
+            accum, a_regs, b_regs, metadata_regs, read_a, read_b, warp_row, warp_col);
 
         if (issue_copy) {
             AgentCpAsyncWait<stages - 2>();
